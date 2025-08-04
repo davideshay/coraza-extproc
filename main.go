@@ -26,10 +26,9 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 		SecRuleEngine On
 		SecAuditEngine On
 		SecAuditLog /dev/stdout
-		SecDefaultAction "phase:1,log,auditlog,pass"
+		SecDefaultAction "phase:1,log,pass"
 
-		# Just log the URI
-		SecRule REQUEST_URI ".*" "id:1001,phase:1,log,auditlog,msg:'Saw REQUEST_URI: %{REQUEST_URI}'"
+		SecRule REQUEST_URI ".*" "id:1001,phase:1,log,msg:'Saw REQUEST_URI: %{REQUEST_URI}'"
 	`
 
 	waf, err := coraza.NewWAF(coraza.NewWAFConfig().WithDirectives(directives))
@@ -144,6 +143,18 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 
 	log.Printf("Calling ProcessURI with: %s %s %s", method, uri, protocol)
 	tx.ProcessURI(uri, method, protocol)
+
+	log.Printf(">>> After ProcessURI: REQUEST_URI = %s", uri)
+
+	if uri == "/admin" {
+		log.Printf(">>> Manually blocking /admin for testing")
+		return createBlockResponse(&types.Interruption{
+			Status: 403,
+			RuleID: 9999,
+			Action: "block",
+		})
+	}
+
 	interruption := tx.ProcessRequestHeaders()
 	if interruption != nil {
 		log.Printf("Blocked by WAF: %v", interruption)

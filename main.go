@@ -469,6 +469,7 @@ func main() {
 		port = "9000"
 	}
 
+	log.SetOutput(os.StdOut);
 	log.Printf("=== Starting Coraza ext_proc server ===")
 	log.Printf("Port: %s", port)
 	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))

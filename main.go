@@ -271,7 +271,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	// Check if this is an empty header configuration issue
 	emptyValueCount := 0
 	for _, header := range headers.Headers.Headers {
-		if header != nil && len(header.Value) == 0 {
+		if header != nil && len(header.RawValue) == 0 {
 			emptyValueCount++
 		}
 	}
@@ -291,12 +291,12 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 			continue
 		}
 		log.Printf("Header[%d]: Key='%s' (len=%d), Value='%s' (len=%d)", 
-			i, header.Key, len(header.Key), header.Value, len(header.Value))
+			i, header.Key, len(header.Key), header.RawValue, len(header.RawValue))
 		
 		// Only log bytes for first few headers to reduce noise
 		if i < 3 {
 			log.Printf("  Key bytes: %v", []byte(header.Key))
-			log.Printf("  Value bytes: %v", []byte(header.Value))
+			log.Printf("  Value bytes: %v", []byte(header.RawValue))
 		}
 	}
 
@@ -311,7 +311,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		log.Printf("Checking header[%d]: '%s' (lowercase: '%s')", i, header.Key, headerKeyLower)
 		
 		if headerKeyLower == ":authority" || headerKeyLower == "host" {
-			authority = header.Value
+			authority = string(header.RawValue)
 			log.Printf("FOUND authority header: %s = '%s'", header.Key, authority)
 			break
 		}
@@ -350,17 +350,17 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 			continue
 		}
 		headerKeyLower := strings.ToLower(header.Key)
-		log.Printf("Checking header[%d] for request details: '%s' = '%s'", i, header.Key, header.Value)
+		log.Printf("Checking header[%d] for request details: '%s' = '%s'", i, header.Key, header.RawValue)
 		
 		switch headerKeyLower {
 		case ":method":
-			method = header.Value
+			method = string(header.RawValue)
 			log.Printf("Found method: '%s'", method)
 		case ":path":
-			uri = header.Value
+			uri = string(header.RawValue)
 			log.Printf("Found path: '%s'", uri)
 		case ":scheme":
-			protocol = header.Value
+			protocol = string(header.RawValue)
 			log.Printf("Found scheme: '%s'", protocol)
 		}
 	}

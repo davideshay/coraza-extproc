@@ -69,14 +69,14 @@ func (c *CorazaExtProc) loadRulesFromDirectory() error {
 			return nil // Continue walking
 		}
 
-		// Skip directories and hidden and non-.conf files
-		if d.IsDir() ||  strings.HasPrefix(d.Name(),".") || !strings.HasSuffix(d.Name(), ".conf") {
+		// Skip directories and non-.conf files
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".conf") {
 			return nil
 		}
 
 		// Extract domain from filename (e.g., "example.com.conf" -> "example.com")
 		domain := strings.TrimSuffix(d.Name(), ".conf")
-
+		
 		// Read rules file
 		rulesContent, err := os.ReadFile(path)
 		if err != nil {
@@ -150,7 +150,7 @@ func (c *CorazaExtProc) watchRulesDirectory() {
 func (c *CorazaExtProc) logAvailableEngines() {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-
+	
 	log.Printf("Available WAF engines:")
 	for domain := range c.wafEngines {
 		log.Printf("  - %s", domain)
@@ -227,17 +227,46 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 
 func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders) *envoy_service_ext_proc_v3.ProcessingResponse {
 	log.Printf("=== Processing Request Headers ===")
-
-	// Log all headers for debugging
-	for _, header := range headers.Headers.Headers {
-		log.Printf("Header: %s = %s", header.Key, header.Value)
+	
+	// Check if headers structure exists
+	if headers == nil {
+		log.Printf("ERROR: headers is nil")
+		return c.continueRequest()
+	}
+	if headers.Headers == nil {
+		log.Printf("ERROR: headers.Headers is nil")
+		return c.continueRequest()
+	}
+	
+	log.Printf("Total headers count: %d", len(headers.Headers.Headers))
+	
+	// Log all headers for debugging with more detail
+	for i, header := range headers.Headers.Headers {
+		if header == nil {
+			log.Printf("Header[%d]: NIL HEADER", i)
+			continue
+		}
+		log.Printf("Header[%d]: Key='%s' (len=%d), Value='%s' (len=%d)", 
+			i, header.Key, len(header.Key), header.Value, len(header.Value))
+		
+		// Also log as bytes to see if there are any hidden characters
+		log.Printf("  Key bytes: %v", []byte(header.Key))
+		log.Printf("  Value bytes: %v", []byte(header.Value))
 	}
 
-	// Extract authority/host
+	// Extract authority/host with more detailed logging
 	var authority string
-	for _, header := range headers.Headers.Headers {
-		if strings.ToLower(header.Key) == ":authority" || strings.ToLower(header.Key) == "host" {
+	log.Printf("Searching for authority/host header...")
+	for i, header := range headers.Headers.Headers {
+		if header == nil {
+			continue
+		}
+		headerKeyLower := strings.ToLower(header.Key)
+		log.Printf("Checking header[%d]: '%s' (lowercase: '%s')", i, header.Key, headerKeyLower)
+		
+		if headerKeyLower == ":authority" || headerKeyLower == "host" {
 			authority = header.Value
+			log.Printf("FOUND authority header: %s = '%s'", header.Key, authority)
 			break
 		}
 	}
@@ -267,16 +296,26 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		}
 	}()
 
-	// Extract method, URI, protocol
+	// Extract method, URI, protocol with detailed logging
 	var method, uri, protocol string
-	for _, header := range headers.Headers.Headers {
-		switch strings.ToLower(header.Key) {
+	log.Printf("Extracting request details...")
+	for i, header := range headers.Headers.Headers {
+		if header == nil {
+			continue
+		}
+		headerKeyLower := strings.ToLower(header.Key)
+		log.Printf("Checking header[%d] for request details: '%s' = '%s'", i, header.Key, header.Value)
+		
+		switch headerKeyLower {
 		case ":method":
 			method = header.Value
+			log.Printf("Found method: '%s'", method)
 		case ":path":
 			uri = header.Value
+			log.Printf("Found path: '%s'", uri)
 		case ":scheme":
 			protocol = header.Value
+			log.Printf("Found scheme: '%s'", protocol)
 		}
 	}
 
@@ -348,7 +387,7 @@ func (c *CorazaExtProc) continueRequest() *envoy_service_ext_proc_v3.ProcessingR
 
 func (c *CorazaExtProc) createBlockResponse(it *types.Interruption) *envoy_service_ext_proc_v3.ProcessingResponse {
 	log.Printf("*** REQUEST BLOCKED *** Action: %s, RuleID: %d, Data: %+v", it.Action, it.RuleID, it.Data)
-
+	
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ImmediateResponse{
 			ImmediateResponse: &envoy_service_ext_proc_v3.ImmediateResponse{
@@ -400,7 +439,7 @@ func main() {
 
 	log.Printf("Starting Coraza ext_proc server on port %s", port)
 	log.Printf("Watching rules directory: %s", processor.rulesDir)
-
+	
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}

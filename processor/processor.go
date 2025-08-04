@@ -3,7 +3,7 @@ package processor
 import (
 	"context"
 
-	"coraza-ext-waf/waf"
+	"coraza-ext-waf/waf" // replace with your actual module path
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extproc "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -19,27 +19,17 @@ func (s *WAFServer) ProcessRequestHeaders(ctx context.Context, req *extproc.Proc
 	headers := headerMap.GetHeaders() // []*corev3.HeaderValue slice
 
 	authority := getHeaderValue(headers, ":authority")
-
-	var profileName string
-	switch authority {
-	case "admin.example.com":
-		profileName = "admin"
-	case "public.example.com":
-		profileName = "public"
-	default:
-		profileName = "default"
-	}
-
+	profileName := waf.GetProfileNameForAuthority(authority)
 	wafInstance := waf.GetProfile(profileName)
+
 	tx := wafInstance.NewTransaction()
 	defer tx.Close()
 
 	for _, hv := range headers {
-		key := hv.Key
-		val := hv.Value
-		tx.AddRequestHeader(key, val)
+		tx.AddRequestHeader(hv.Key, hv.Value)
 	}
 
+	// For example purposes, using dummy URI and method. In real usage parse from request.
 	tx.ProcessURI("/", "GET", "HTTP/1.1")
 	tx.ProcessRequestHeaders()
 

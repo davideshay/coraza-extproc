@@ -8,6 +8,7 @@ require (
 	github.com/corazawaf/coraza/v3 v3.0.0
 	github.com/envoyproxy/go-control-plane/envoy v1.32.3
 	google.golang.org/grpc v1.67.1
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

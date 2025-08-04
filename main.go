@@ -373,8 +373,6 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		tx.ProcessURI(uri, method, protocol)
 	}
 
-	log.Printf("Coraza REQUEST_URI: '%s'", tx.Variables().RequestURI.String())
-
 	// Process headers
 	for _, header := range headers.Headers.Headers {
 		if strings.HasPrefix(header.Key, ":") {
@@ -471,7 +469,7 @@ func main() {
 		port = "9000"
 	}
 
-	log.SetOutput(os.StdOut);
+	log.SetOutput(os.Stdout);
 	log.Printf("=== Starting Coraza ext_proc server ===")
 	log.Printf("Port: %s", port)
 	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))

@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -194,22 +195,46 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 }
 
 func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) error {
+	log.Printf("=== New gRPC stream connection ===")
+	
 	for {
 		req, err := stream.Recv()
 		if err != nil {
+			log.Printf("Error receiving from stream: %v", err)
 			return err
+		}
+
+		log.Printf("Received request type: %T", req.Request)
+		
+		// Log the raw request for debugging
+		if req.Request != nil {
+			log.Printf("Raw request details: %+v", req.Request)
 		}
 
 		var resp *envoy_service_ext_proc_v3.ProcessingResponse
 
 		switch r := req.Request.(type) {
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestHeaders:
+			log.Printf("Processing RequestHeaders")
+			if r.RequestHeaders != nil {
+				log.Printf("RequestHeaders object exists")
+				if r.RequestHeaders.Headers != nil {
+					log.Printf("Headers field exists with %d headers", len(r.RequestHeaders.Headers.Headers))
+				} else {
+					log.Printf("ERROR: RequestHeaders.Headers is nil")
+				}
+			} else {
+				log.Printf("ERROR: RequestHeaders is nil")
+			}
 			resp = c.processRequestHeaders(r.RequestHeaders)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestBody:
+			log.Printf("Processing RequestBody")
 			resp = c.processRequestBody(r.RequestBody, req)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_ResponseHeaders:
+			log.Printf("Processing ResponseHeaders")
 			resp = c.processResponseHeaders(r.ResponseHeaders)
 		default:
+			log.Printf("Unknown request type, sending continue response")
 			resp = &envoy_service_ext_proc_v3.ProcessingResponse{
 				Response: &envoy_service_ext_proc_v3.ProcessingResponse_ImmediateResponse{
 					ImmediateResponse: &envoy_service_ext_proc_v3.ImmediateResponse{
@@ -219,9 +244,12 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 			}
 		}
 
+		log.Printf("Sending response type: %T", resp.Response)
 		if err := stream.Send(resp); err != nil {
+			log.Printf("Error sending response: %v", err)
 			return err
 		}
+		log.Printf("Response sent successfully")
 	}
 }
 
@@ -240,6 +268,22 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	
 	log.Printf("Total headers count: %d", len(headers.Headers.Headers))
 	
+	// Check if this is an empty header configuration issue
+	emptyValueCount := 0
+	for _, header := range headers.Headers.Headers {
+		if header != nil && len(header.Value) == 0 {
+			emptyValueCount++
+		}
+	}
+	
+	if emptyValueCount == len(headers.Headers.Headers) {
+		log.Printf("WARNING: ALL header values are empty! This suggests a configuration issue.")
+		log.Printf("Check your Envoy Gateway ExtProc configuration - you may need:")
+		log.Printf("  processingMode:")
+		log.Printf("    requestHeaderMode: SEND")
+		log.Printf("    responseHeaderMode: SKIP")
+	}
+	
 	// Log all headers for debugging with more detail
 	for i, header := range headers.Headers.Headers {
 		if header == nil {
@@ -249,9 +293,11 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		log.Printf("Header[%d]: Key='%s' (len=%d), Value='%s' (len=%d)", 
 			i, header.Key, len(header.Key), header.Value, len(header.Value))
 		
-		// Also log as bytes to see if there are any hidden characters
-		log.Printf("  Key bytes: %v", []byte(header.Key))
-		log.Printf("  Value bytes: %v", []byte(header.Value))
+		// Only log bytes for first few headers to reduce noise
+		if i < 3 {
+			log.Printf("  Key bytes: %v", []byte(header.Key))
+			log.Printf("  Value bytes: %v", []byte(header.Value))
+		}
 	}
 
 	// Extract authority/host with more detailed logging
@@ -423,23 +469,31 @@ func main() {
 		port = "9000"
 	}
 
+	log.Printf("=== Starting Coraza ext_proc server ===")
+	log.Printf("Port: %s", port)
+	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))
+
 	lis, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		log.Fatalf("Failed to listen: %v", err)
 	}
+	log.Printf("TCP listener created successfully on :%s", port)
 
 	processor, err := NewCorazaExtProc()
 	if err != nil {
 		log.Fatalf("Failed to create processor: %v", err)
 	}
 	defer processor.Close()
+	log.Printf("Coraza processor created successfully")
 
 	s := grpc.NewServer()
 	envoy_service_ext_proc_v3.RegisterExternalProcessorServer(s, processor)
+	log.Printf("gRPC server created and ext_proc service registered")
 
-	log.Printf("Starting Coraza ext_proc server on port %s", port)
 	log.Printf("Watching rules directory: %s", processor.rulesDir)
+	processor.logAvailableEngines()
 	
+	log.Printf("=== Server ready - waiting for connections ===")
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("Failed to serve: %v", err)
 	}

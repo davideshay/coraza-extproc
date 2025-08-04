@@ -29,6 +29,7 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 		SecDefaultAction "phase:1,log,pass"
 
 		SecRule REQUEST_URI ".*" "id:1001,phase:1,log,msg:'Saw REQUEST_URI: %{REQUEST_URI}'"
+		SecRule REQUEST_URI "@contains admin" "id:1002,phase:1,block,status:403,msg:'Blocked by WAF: admin path'"
 	`
 
 	waf, err := coraza.NewWAF(coraza.NewWAFConfig().WithDirectives(directives))
@@ -143,17 +144,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 
 	log.Printf("Calling ProcessURI with: %s %s %s", method, uri, protocol)
 	tx.ProcessURI(uri, method, protocol)
-
 	log.Printf(">>> After ProcessURI: REQUEST_URI = %s", uri)
-
-	if uri == "/admin" {
-		log.Printf(">>> Manually blocking /admin for testing")
-		return createBlockResponse(&types.Interruption{
-			Status: 403,
-			RuleID: 9999,
-			Action: "block",
-		})
-	}
 
 	interruption := tx.ProcessRequestHeaders()
 	if interruption != nil {
@@ -205,7 +196,7 @@ func main() {
 	}
 
 	log.SetOutput(os.Stdout)
-	log.Printf("=== Starting WAF ext_proc server (safe mode) ===")
+	log.Printf("=== Starting WAF ext_proc server (rule-based mode) ===")
 	log.Printf("Go version: %s", runtime.Version())
 
 	lis, err := net.Listen("tcp", ":"+port)

@@ -56,7 +56,45 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestHeaders:
 			log.Printf("Processing RequestHeaders")
 			resp = c.processRequestHeaders(r.RequestHeaders)
+
+		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestBody:
+			log.Printf("Processing RequestBody")
+			resp = &envoy_service_ext_proc_v3.ProcessingResponse{
+				Response: &envoy_service_ext_proc_v3.ProcessingResponse_RequestBody{
+					RequestBody: &envoy_service_ext_proc_v3.BodyResponse{
+						Response: &envoy_service_ext_proc_v3.CommonResponse{
+							Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
+						},
+					},
+				},
+			}
+
+		case *envoy_service_ext_proc_v3.ProcessingRequest_ResponseHeaders:
+			log.Printf("Processing ResponseHeaders")
+			resp = &envoy_service_ext_proc_v3.ProcessingResponse{
+				Response: &envoy_service_ext_proc_v3.ProcessingResponse_ResponseHeaders{
+					ResponseHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
+						Response: &envoy_service_ext_proc_v3.CommonResponse{
+							Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
+						},
+					},
+				},
+			}
+
+		case *envoy_service_ext_proc_v3.ProcessingRequest_ResponseBody:
+			log.Printf("Processing ResponseBody")
+			resp = &envoy_service_ext_proc_v3.ProcessingResponse{
+				Response: &envoy_service_ext_proc_v3.ProcessingResponse_ResponseBody{
+					ResponseBody: &envoy_service_ext_proc_v3.BodyResponse{
+						Response: &envoy_service_ext_proc_v3.CommonResponse{
+							Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
+						},
+					},
+				},
+			}
+
 		default:
+			log.Printf("Unknown request type: %T", req.Request)
 			resp = &envoy_service_ext_proc_v3.ProcessingResponse{
 				Response: &envoy_service_ext_proc_v3.ProcessingResponse_ImmediateResponse{
 					ImmediateResponse: &envoy_service_ext_proc_v3.ImmediateResponse{

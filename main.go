@@ -370,12 +370,8 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	// Set request line
 	if method != "" && uri != "" {
 		log.Printf("Processing URI: %s", uri)
-		err := tx.ProcessURI(uri, method, protocol)
-		if (err != nil) {
-			log.Printf("❌ tx.ProcessURI failed: %v", err)
-		} else {
-			log.Printf("✅ tx.ProcessURI succeeded")
-		}
+		tx.ProcessURI(uri, method, protocol)
+		log.Printf("Completed processing URI")
 	}
 
 	// Process headers

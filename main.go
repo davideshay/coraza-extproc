@@ -73,7 +73,7 @@ func (c *CorazaExtProc) loadRulesFromDirectory() error {
 		log.Printf("Contents of d.Name: %s",d.Name())
 
 		// Skip processing ALL files and the tree inside hidden directories (k8s config mounts)
-		if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != root {
+		if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != c.rulesDir {
 			log.Printf("Not descending down hidden directory %s",d.Name())
 			return filepath.SkipDir
 		}

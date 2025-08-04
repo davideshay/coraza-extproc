@@ -147,12 +147,28 @@ func (c *CorazaExtProc) watchRulesDirectory() {
 	}
 }
 
+func (c *CorazaExtProc) logAvailableEngines() {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	log.Printf("Available WAF engines:")
+	for domain := range c.wafEngines {
+		log.Printf("  - %s", domain)
+	}
+	if len(c.wafEngines) == 0 {
+		log.Printf("  No WAF engines loaded!")
+	}
+}
+
 func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
+	log.Printf("Looking for WAF engine for authority: %s", authority)
+
 	// Try exact match first
 	if waf, exists := c.wafEngines[authority]; exists {
+		log.Printf("Found exact match for: %s", authority)
 		return waf
 	}
 
@@ -161,6 +177,7 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 		if strings.HasPrefix(domain, "*.") {
 			wildcard := strings.TrimPrefix(domain, "*.")
 			if strings.HasSuffix(authority, wildcard) {
+				log.Printf("Found wildcard match: %s matches %s", authority, domain)
 				return waf
 			}
 		}
@@ -168,9 +185,11 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 
 	// Return default WAF if exists
 	if waf, exists := c.wafEngines["default"]; exists {
+		log.Printf("Using default WAF engine for: %s", authority)
 		return waf
 	}
 
+	log.Printf("No WAF engine found for: %s", authority)
 	return nil
 }
 
@@ -207,6 +226,13 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 }
 
 func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders) *envoy_service_ext_proc_v3.ProcessingResponse {
+	log.Printf("=== Processing Request Headers ===")
+
+	// Log all headers for debugging
+	for _, header := range headers.Headers.Headers {
+		log.Printf("Header: %s = %s", header.Key, header.Value)
+	}
+
 	// Extract authority/host
 	var authority string
 	for _, header := range headers.Headers.Headers {
@@ -216,17 +242,22 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		}
 	}
 
+	log.Printf("Extracted authority: %s", authority)
+
 	if authority == "" {
-		log.Printf("No authority found in headers")
+		log.Printf("No authority found in headers - continuing request")
 		return c.continueRequest()
 	}
 
 	// Get WAF engine for this domain
 	waf := c.getWAFEngine(authority)
 	if waf == nil {
-		log.Printf("No WAF engine found for authority: %s", authority)
+		log.Printf("No WAF engine found for authority: %s - continuing request", authority)
+		c.logAvailableEngines()
 		return c.continueRequest()
 	}
+
+	log.Printf("Found WAF engine for authority: %s", authority)
 
 	// Create transaction
 	tx := waf.NewTransaction()
@@ -249,12 +280,12 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		}
 	}
 
+	log.Printf("Request details - Method: %s, URI: %s, Protocol: %s", method, uri, protocol)
+
 	// Set request line
 	if method != "" && uri != "" {
+		log.Printf("Processing URI: %s", uri)
 		tx.ProcessURI(uri, method, protocol)
-		if it := tx.ProcessRequestHeaders(); it != nil {
-			return c.createBlockResponse(it)
-		}
 	}
 
 	// Process headers
@@ -262,14 +293,18 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		if strings.HasPrefix(header.Key, ":") {
 			continue // Skip pseudo headers for now
 		}
+		log.Printf("Adding request header: %s = %s", header.Key, header.Value)
 		tx.AddRequestHeader(header.Key, header.Value)
 	}
 
 	// Check if request should be blocked
+	log.Printf("Processing request headers through WAF...")
 	if it := tx.ProcessRequestHeaders(); it != nil {
+		log.Printf("WAF BLOCKED REQUEST - Action: %s, RuleID: %d", it.Action, it.RuleID)
 		return c.createBlockResponse(it)
 	}
 
+	log.Printf("WAF allowed request - continuing")
 	return c.continueRequest()
 }
 
@@ -312,7 +347,7 @@ func (c *CorazaExtProc) continueRequest() *envoy_service_ext_proc_v3.ProcessingR
 }
 
 func (c *CorazaExtProc) createBlockResponse(it *types.Interruption) *envoy_service_ext_proc_v3.ProcessingResponse {
-	log.Printf("Request blocked by interruption: %s", it.Action)
+	log.Printf("*** REQUEST BLOCKED *** Action: %s, RuleID: %d, Data: %+v", it.Action, it.RuleID, it.Data)
 
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ImmediateResponse{
@@ -320,7 +355,7 @@ func (c *CorazaExtProc) createBlockResponse(it *types.Interruption) *envoy_servi
 				Status: &envoy_type_v3.HttpStatus{
 					Code: envoy_type_v3.StatusCode_Forbidden,
 				},
-				Body: fmt.Sprintf("Request blocked by WAF: %s", it.Action),
+				Body: fmt.Sprintf("Request blocked by WAF - Rule ID: %d, Action: %s", it.RuleID, it.Action),
 				Headers: &envoy_service_ext_proc_v3.HeaderMutation{
 					SetHeaders: []*envoy_config_core_v3.HeaderValueOption{
 						{

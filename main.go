@@ -383,6 +383,8 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		tx.AddRequestHeader(header.Key, string(header.RawValue))
 	}
 
+	tx.AddRequestHeader("X-Debug", "true")
+
 	// Check if request should be blocked
 	log.Printf("Processing request headers through WAF...")
 	if it := tx.ProcessRequestHeaders(); it != nil {

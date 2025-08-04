@@ -27,8 +27,9 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 		SecAuditEngine On
 		SecAuditLog /dev/stdout
 		SecDefaultAction "phase:1,log,auditlog,pass"
+
+		# Just log the URI
 		SecRule REQUEST_URI ".*" "id:1001,phase:1,log,auditlog,msg:'Saw REQUEST_URI: %{REQUEST_URI}'"
-		SecRule REQUEST_URI "@contains admin" "id:1002,phase:1,block,status:403,msg:'Blocked admin URI'"
 	`
 
 	waf, err := coraza.NewWAF(coraza.NewWAFConfig().WithDirectives(directives))
@@ -97,7 +98,9 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		return continueRequest()
 	}
 
-	if uri[0] != '/' {
+	if uri == "" {
+		uri = "/"
+	} else if uri[0] != '/' {
 		uri = "/" + uri
 	}
 
@@ -109,6 +112,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		return createBlockResponse(interruption)
 	}
 
+	log.Printf("WAF allowed request")
 	return continueRequest()
 }
 
@@ -152,7 +156,7 @@ func main() {
 	}
 
 	log.SetOutput(os.Stdout)
-	log.Printf("=== Starting hardcoded WAF server ===")
+	log.Printf("=== Starting WAF ext_proc server (safe mode) ===")
 	log.Printf("Go version: %s", runtime.Version())
 
 	lis, err := net.Listen("tcp", ":"+port)

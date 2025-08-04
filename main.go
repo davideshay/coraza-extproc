@@ -378,8 +378,8 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		if strings.HasPrefix(header.Key, ":") {
 			continue // Skip pseudo headers for now
 		}
-		log.Printf("Adding request header: %s = %s", header.Key, header.RawValue)
-		tx.AddRequestHeader(header.Key, header.RawValue)
+		log.Printf("Adding request header: %s = %s", header.Key, string(header.RawValue))
+		tx.AddRequestHeader(header.Key, string(header.RawValue))
 	}
 
 	// Check if request should be blocked

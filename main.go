@@ -70,6 +70,8 @@ func (c *CorazaExtProc) loadRulesFromDirectory() error {
 			return nil // Continue walking
 		}
 
+		log.printf("Contents of d.Name: %s",d.Name())
+
 		// Skip directories and non-.conf files
 		if d.IsDir() || strings.HasPrefix(d.Name(),".") || !strings.HasSuffix(d.Name(), ".conf") {
 			return nil

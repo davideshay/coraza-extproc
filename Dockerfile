@@ -15,10 +15,12 @@ FROM alpine:3.22
 
 RUN apk add --no-cache ca-certificates
 
+RUN mkdir -p /etc/coraza/rules
+
 WORKDIR /app
 
 COPY --from=builder /app/coraza-ext-waf .
-COPY --from=builder /app/waf ./waf
+
 
 EXPOSE 50051
 

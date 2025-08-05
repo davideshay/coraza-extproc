@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/corazawaf/coraza/v3"
 	"github.com/corazawaf/coraza/v3/types"
@@ -24,7 +25,7 @@ import (
 type CorazaExtProc struct {
 	envoy_service_ext_proc_v3.UnimplementedExternalProcessorServer
 	wafEngines   map[string]coraza.WAF // domain -> WAF engine
-	transactions map[string]types.Transaction // stream ID -> transaction
+	transactions map[uintptr]types.Transaction // stream pointer -> transaction
 	mutex        sync.RWMutex
 	txMutex      sync.RWMutex
 	rulesDir     string
@@ -44,7 +45,7 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 
 	processor := &CorazaExtProc{
 		wafEngines:   make(map[string]coraza.WAF),
-		transactions: make(map[string]types.Transaction),
+		transactions: make(map[uintptr]types.Transaction),
 		rulesDir:     rulesDir,
 		watcher:      watcher,
 	}
@@ -202,25 +203,25 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 	return nil
 }
 
-func (c *CorazaExtProc) getStreamID(req *envoy_service_ext_proc_v3.ProcessingRequest) string {
-	// Use memory address as stream ID since Attributes field doesn't exist
-	// In production, you might want to use other unique identifiers
-	return fmt.Sprintf("%p", req)
+func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) uintptr {
+	// Use the stream pointer as a unique identifier
+	// This should remain consistent throughout the request lifecycle
+	return uintptr(unsafe.Pointer(&stream))
 }
 
-func (c *CorazaExtProc) getTransaction(streamID string) types.Transaction {
+func (c *CorazaExtProc) getTransaction(streamID uintptr) types.Transaction {
 	c.txMutex.RLock()
 	defer c.txMutex.RUnlock()
 	return c.transactions[streamID]
 }
 
-func (c *CorazaExtProc) setTransaction(streamID string, tx types.Transaction) {
+func (c *CorazaExtProc) setTransaction(streamID uintptr, tx types.Transaction) {
 	c.txMutex.Lock()
 	defer c.txMutex.Unlock()
 	c.transactions[streamID] = tx
 }
 
-func (c *CorazaExtProc) removeTransaction(streamID string) {
+func (c *CorazaExtProc) removeTransaction(streamID uintptr) {
 	c.txMutex.Lock()
 	defer c.txMutex.Unlock()
 	if tx, exists := c.transactions[streamID]; exists {
@@ -261,13 +262,13 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 			} else {
 				log.Printf("ERROR: RequestHeaders is nil")
 			}
-			resp = c.processRequestHeaders(r.RequestHeaders, req)
+			resp = c.processRequestHeaders(r.RequestHeaders, stream)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestBody:
 			log.Printf("Processing RequestBody")
-			resp = c.processRequestBody(r.RequestBody, req)
+			resp = c.processRequestBody(r.RequestBody, stream)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_ResponseHeaders:
 			log.Printf("Processing ResponseHeaders")
-			resp = c.processResponseHeaders(r.ResponseHeaders, req)
+			resp = c.processResponseHeaders(r.ResponseHeaders, stream)
 		default:
 			log.Printf("Unknown request type, sending continue response")
 			resp = &envoy_service_ext_proc_v3.ProcessingResponse{
@@ -288,7 +289,7 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 	}
 }
 
-func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, req *envoy_service_ext_proc_v3.ProcessingRequest) *envoy_service_ext_proc_v3.ProcessingResponse {
+func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) *envoy_service_ext_proc_v3.ProcessingResponse {
 	log.Printf("=== Processing Request Headers ===")
 
 	// Check if headers structure exists
@@ -367,7 +368,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 
 	// Create transaction and store it for later use in body processing
 	tx := waf.NewTransaction()
-	streamID := c.getStreamID(req)
+	streamID := c.getStreamID(stream)
 	c.setTransaction(streamID, tx)
 
 	// Extract method, URI, protocol with detailed logging
@@ -462,7 +463,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	return c.continueRequest()
 }
 
-func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody, req *envoy_service_ext_proc_v3.ProcessingRequest) *envoy_service_ext_proc_v3.ProcessingResponse {
+func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody, stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) *envoy_service_ext_proc_v3.ProcessingResponse {
 	log.Printf("=== Processing Request Body ===")
 
 	if body == nil {
@@ -470,10 +471,10 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 		return c.continueRequestBody()
 	}
 
-	streamID := c.getStreamID(req)
+	streamID := c.getStreamID(stream)
 	tx := c.getTransaction(streamID)
 	if tx == nil {
-		log.Printf("ERROR: No transaction found for stream %s", streamID)
+		log.Printf("ERROR: No transaction found for stream %x", streamID)
 		return c.continueRequestBody()
 	}
 
@@ -513,9 +514,9 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 	return c.continueRequestBody()
 }
 
-func (c *CorazaExtProc) processResponseHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, req *envoy_service_ext_proc_v3.ProcessingRequest) *envoy_service_ext_proc_v3.ProcessingResponse {
+func (c *CorazaExtProc) processResponseHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) *envoy_service_ext_proc_v3.ProcessingResponse {
 	// Clean up any remaining transactions for this stream
-	streamID := c.getStreamID(req)
+	streamID := c.getStreamID(stream)
 	c.removeTransaction(streamID)
 	
 	return &envoy_service_ext_proc_v3.ProcessingResponse{

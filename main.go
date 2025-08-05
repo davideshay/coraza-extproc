@@ -23,6 +23,8 @@ type CorazaExtProc struct {
 
 func NewCorazaExtProc() (*CorazaExtProc, error) {
 	directives := "" +
+		"SecDebugLogLevel 9\n" +
+		"SecDebugLog /dev/stdout\n" +
 		"SecRuleEngine On\n" +
 		"SecAuditEngine On\n" +
 		"SecAuditLog /dev/stdout\n" +

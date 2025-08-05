@@ -23,10 +23,12 @@ import (
 
 type CorazaExtProc struct {
 	envoy_service_ext_proc_v3.UnimplementedExternalProcessorServer
-	wafEngines map[string]coraza.WAF // domain -> WAF engine
-	mutex      sync.RWMutex
-	rulesDir   string
-	watcher    *fsnotify.Watcher
+	wafEngines   map[string]coraza.WAF // domain -> WAF engine
+	transactions map[string]types.Transaction // stream ID -> transaction
+	mutex        sync.RWMutex
+	txMutex      sync.RWMutex
+	rulesDir     string
+	watcher      *fsnotify.Watcher
 }
 
 func NewCorazaExtProc() (*CorazaExtProc, error) {
@@ -41,9 +43,10 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 	}
 
 	processor := &CorazaExtProc{
-		wafEngines: make(map[string]coraza.WAF),
-		rulesDir:   rulesDir,
-		watcher:    watcher,
+		wafEngines:   make(map[string]coraza.WAF),
+		transactions: make(map[string]types.Transaction),
+		rulesDir:     rulesDir,
+		watcher:      watcher,
 	}
 
 	// Load initial configurations
@@ -70,11 +73,8 @@ func (c *CorazaExtProc) loadRulesFromDirectory() error {
 			return nil // Continue walking
 		}
 
-		log.Printf("Contents of d.Name: %s", d.Name())
-
 		// Skip processing ALL files and the tree inside hidden directories (k8s config mounts)
 		if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != c.rulesDir {
-			log.Printf("Not descending down hidden directory %s", d.Name())
 			return filepath.SkipDir
 		}
 
@@ -202,6 +202,33 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 	return nil
 }
 
+func (c *CorazaExtProc) getStreamID(req *envoy_service_ext_proc_v3.ProcessingRequest) string {
+	// Use memory address as stream ID since Attributes field doesn't exist
+	// In production, you might want to use other unique identifiers
+	return fmt.Sprintf("%p", req)
+}
+
+func (c *CorazaExtProc) getTransaction(streamID string) types.Transaction {
+	c.txMutex.RLock()
+	defer c.txMutex.RUnlock()
+	return c.transactions[streamID]
+}
+
+func (c *CorazaExtProc) setTransaction(streamID string, tx types.Transaction) {
+	c.txMutex.Lock()
+	defer c.txMutex.Unlock()
+	c.transactions[streamID] = tx
+}
+
+func (c *CorazaExtProc) removeTransaction(streamID string) {
+	c.txMutex.Lock()
+	defer c.txMutex.Unlock()
+	if tx, exists := c.transactions[streamID]; exists {
+		tx.Close()
+		delete(c.transactions, streamID)
+	}
+}
+
 func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) error {
 	log.Printf("=== New gRPC stream connection ===")
 
@@ -234,13 +261,13 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 			} else {
 				log.Printf("ERROR: RequestHeaders is nil")
 			}
-			resp = c.processRequestHeaders(r.RequestHeaders)
+			resp = c.processRequestHeaders(r.RequestHeaders, req)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestBody:
 			log.Printf("Processing RequestBody")
 			resp = c.processRequestBody(r.RequestBody, req)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_ResponseHeaders:
 			log.Printf("Processing ResponseHeaders")
-			resp = c.processResponseHeaders(r.ResponseHeaders)
+			resp = c.processResponseHeaders(r.ResponseHeaders, req)
 		default:
 			log.Printf("Unknown request type, sending continue response")
 			resp = &envoy_service_ext_proc_v3.ProcessingResponse{
@@ -261,7 +288,7 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 	}
 }
 
-func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders) *envoy_service_ext_proc_v3.ProcessingResponse {
+func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, req *envoy_service_ext_proc_v3.ProcessingRequest) *envoy_service_ext_proc_v3.ProcessingResponse {
 	log.Printf("=== Processing Request Headers ===")
 
 	// Check if headers structure exists
@@ -338,13 +365,10 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 
 	log.Printf("Found WAF engine for authority: %s", authority)
 
-	// Create transaction
+	// Create transaction and store it for later use in body processing
 	tx := waf.NewTransaction()
-	defer func() {
-		if err := tx.Close(); err != nil {
-			log.Printf("Failed to close transaction: %v", err)
-		}
-	}()
+	streamID := c.getStreamID(req)
+	c.setTransaction(streamID, tx)
 
 	// Extract method, URI, protocol with detailed logging
 	var method, uri, protocol string
@@ -391,34 +415,109 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		tx.AddRequestHeader(header.Key, string(header.RawValue))
 	}
 
-	tx.AddRequestHeader("X-Debug", "true")
-
 	// Check if request should be blocked
 	log.Printf("Processing request headers through WAF...")
 	if it := tx.ProcessRequestHeaders(); it != nil {
 		log.Printf("WAF BLOCKED REQUEST - Action: %s, RuleID: %d", it.Action, it.RuleID)
+		// Clean up transaction since we're blocking
+		c.removeTransaction(streamID)
 		return c.createBlockResponse(it)
 	}
 
-	log.Printf("WAF allowed request - continuing")
+	log.Printf("WAF allowed request headers - continuing to body processing if needed")
+	
+	// Check if we need to process the request body
+	hasBody := false
+	for _, header := range headers.Headers.Headers {
+		if header == nil {
+			continue
+		}
+		headerKeyLower := strings.ToLower(header.Key)
+		if headerKeyLower == "content-length" && string(header.RawValue) != "0" {
+			hasBody = true
+			break
+		}
+		if headerKeyLower == "transfer-encoding" && strings.Contains(strings.ToLower(string(header.RawValue)), "chunked") {
+			hasBody = true
+			break
+		}
+	}
+
+	if hasBody {
+		log.Printf("Request has body - requesting body processing")
+		return &envoy_service_ext_proc_v3.ProcessingResponse{
+			Response: &envoy_service_ext_proc_v3.ProcessingResponse_RequestHeaders{
+				RequestHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
+					Response: &envoy_service_ext_proc_v3.CommonResponse{
+						Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
+					},
+				},
+			},
+		}
+	}
+
+	log.Printf("Request has no body - processing complete")
+	// Clean up transaction since we don't need it anymore
+	c.removeTransaction(streamID)
 	return c.continueRequest()
 }
 
 func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody, req *envoy_service_ext_proc_v3.ProcessingRequest) *envoy_service_ext_proc_v3.ProcessingResponse {
-	// For body processing, you'd need to maintain transaction state across calls
-	// This is a simplified implementation that just continues
-	return &envoy_service_ext_proc_v3.ProcessingResponse{
-		Response: &envoy_service_ext_proc_v3.ProcessingResponse_RequestBody{
-			RequestBody: &envoy_service_ext_proc_v3.BodyResponse{
-				Response: &envoy_service_ext_proc_v3.CommonResponse{
-					Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
-				},
-			},
-		},
+	log.Printf("=== Processing Request Body ===")
+
+	if body == nil {
+		log.Printf("ERROR: body is nil")
+		return c.continueRequestBody()
 	}
+
+	streamID := c.getStreamID(req)
+	tx := c.getTransaction(streamID)
+	if tx == nil {
+		log.Printf("ERROR: No transaction found for stream %s", streamID)
+		return c.continueRequestBody()
+	}
+
+	log.Printf("Processing body chunk of size: %d bytes", len(body.Body))
+	log.Printf("End of stream: %t", body.EndOfStream)
+
+	// Write body data to transaction
+	if len(body.Body) > 0 {
+		log.Printf("Writing body data to WAF transaction...")
+		if _, _, err := tx.WriteRequestBody(body.Body); err != nil {
+			log.Printf("Failed to write request body: %v", err)
+			c.removeTransaction(streamID)
+			return c.continueRequestBody()
+		}
+		log.Printf("Successfully wrote %d bytes to transaction", len(body.Body))
+	}
+
+	// If this is the end of the stream, process the complete body
+	if body.EndOfStream {
+		log.Printf("End of stream reached - processing complete request body through WAF...")
+		
+		// Process the complete request body
+		if it, err := tx.ProcessRequestBody(); err != nil {
+			log.Printf("Failed to process request body: %v", err)
+		} else if it != nil {
+			log.Printf("WAF BLOCKED REQUEST BODY - Action: %s, RuleID: %d", it.Action, it.RuleID)
+			c.removeTransaction(streamID)
+			return c.createBlockResponse(it)
+		}
+
+		log.Printf("WAF allowed request body - request processing complete")
+		c.removeTransaction(streamID)
+	} else {
+		log.Printf("More body data expected - continuing...")
+	}
+
+	return c.continueRequestBody()
 }
 
-func (c *CorazaExtProc) processResponseHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders) *envoy_service_ext_proc_v3.ProcessingResponse {
+func (c *CorazaExtProc) processResponseHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, req *envoy_service_ext_proc_v3.ProcessingRequest) *envoy_service_ext_proc_v3.ProcessingResponse {
+	// Clean up any remaining transactions for this stream
+	streamID := c.getStreamID(req)
+	c.removeTransaction(streamID)
+	
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
@@ -434,6 +533,18 @@ func (c *CorazaExtProc) continueRequest() *envoy_service_ext_proc_v3.ProcessingR
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_RequestHeaders{
 			RequestHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
+				Response: &envoy_service_ext_proc_v3.CommonResponse{
+					Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
+				},
+			},
+		},
+	}
+}
+
+func (c *CorazaExtProc) continueRequestBody() *envoy_service_ext_proc_v3.ProcessingResponse {
+	return &envoy_service_ext_proc_v3.ProcessingResponse{
+		Response: &envoy_service_ext_proc_v3.ProcessingResponse_RequestBody{
+			RequestBody: &envoy_service_ext_proc_v3.BodyResponse{
 				Response: &envoy_service_ext_proc_v3.CommonResponse{
 					Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
 				},
@@ -480,6 +591,14 @@ func continueRequest() *envoy_service_ext_proc_v3.ProcessingResponse {
 }
 
 func (c *CorazaExtProc) Close() error {
+	// Clean up all transactions
+	c.txMutex.Lock()
+	for streamID, tx := range c.transactions {
+		tx.Close()
+		delete(c.transactions, streamID)
+	}
+	c.txMutex.Unlock()
+
 	if c.watcher != nil {
 		return c.watcher.Close()
 	}

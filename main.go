@@ -22,20 +22,20 @@ type CorazaExtProc struct {
 }
 
 func NewCorazaExtProc() (*CorazaExtProc, error) {
-	directives := `
-		SecRuleEngine On
-		SecAuditEngine On
-		SecAuditLog /dev/stdout
-		SecDefaultAction "phase:1,log,pass"
-
-		SecRule REQUEST_URI ".*" "id:1001,phase:1,log,msg:'Saw REQUEST_URI: %{REQUEST_URI}'"
-		SecRule REQUEST_URI "@contains admin" "id:1002,phase:1,block,status:403,msg:'Blocked by WAF: admin path'"
-	`
+	directives := "" +
+		"SecRuleEngine On\n" +
+		"SecAuditEngine On\n" +
+		"SecAuditLog /dev/stdout\n" +
+		"SecDefaultAction \"phase:1,log,pass\"\n" +
+		"SecRule REQUEST_URI \".*\" \"id:1001,phase:1,log,msg:'Saw REQUEST_URI: %{REQUEST_URI}'\"\n" +
+		"SecRule REQUEST_URI \"@contains admin\" \"id:1002,phase:1,block,status:403,msg:'Blocked by WAF: admin path'\"\n"
 
 	waf, err := coraza.NewWAF(coraza.NewWAFConfig().WithDirectives(directives))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create WAF: %w", err)
 	}
+
+	log.Printf("✅ WAF initialized with hardcoded rules")
 
 	return &CorazaExtProc{waf: waf}, nil
 }

@@ -27,7 +27,7 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 		"SecAuditEngine On\n" +
 		"SecAuditLog /dev/stdout\n" +
 		"SecDefaultAction \"phase:1,log,pass\"\n" +
-		"SecRule REQUEST_URI \".*\" \"id:1000,phase:2,pass,log,msg:'Logging REQUEST_URI'"
+		"SecRule REQUEST_URI \".*\" \"id:1001,phase:1,log,msg:'Saw REQUEST_URI: %{REQUEST_URI}'\"\n"
 
 		// "SecRule &REQUEST_URI \"@ge 0\" \"id:9999,phase:1,log,msg:'REQUEST_URI exists'\"\n" +
 		// "SecRule REQUEST_URI \".*\" \"id:1001,phase:1,log,msg:'Saw REQUEST_URI: %{REQUEST_URI}'\"\n" +

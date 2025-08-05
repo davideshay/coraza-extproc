@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/corazawaf/coraza/v3"
 	"github.com/corazawaf/coraza/v3/types"
@@ -29,7 +30,7 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 		"SecAuditEngine On\n" +
 		"SecAuditLog /dev/stdout\n" +
 		"SecDefaultAction \"phase:1,log,pass\"\n" +
-		"SecRule REQUEST_URI \".*\" \"id:1001,phase:1,log,msg:'Saw REQUEST_URI: %{REQUEST_URI}'\"\n" +
+		//		"SecRule REQUEST_URI \".*\" \"id:1001,phase:1,log,msg:'Saw REQUEST_URI: %{REQUEST_URI}'\"\n" +
 
 		// "SecRule &REQUEST_URI \"@ge 0\" \"id:9999,phase:1,log,msg:'REQUEST_URI exists'\"\n" +
 		// "SecRule REQUEST_URI \".*\" \"id:1001,phase:1,log,msg:'Saw REQUEST_URI: %{REQUEST_URI}'\"\n" +
@@ -137,8 +138,6 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 			uri = string(h.RawValue)
 		case ":scheme":
 			protocol = string(h.RawValue)
-		default:
-			tx.AddRequestHeader(h.Key, string(h.RawValue))
 		}
 	}
 
@@ -147,15 +146,16 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		return continueRequest()
 	}
 
-	if uri == "" {
-		uri = "/"
-	} else if uri[0] != '/' {
-		uri = "/" + uri
-	}
-
 	log.Printf("Calling ProcessURI with: %s %s %s", method, uri, protocol)
 	tx.ProcessURI(uri, method, protocol)
 	log.Printf(">>> After ProcessURI: REQUEST_URI = %s", uri)
+
+	// Add all headers (including non-pseudo headers)
+	for _, h := range headers.Headers.Headers {
+		if !strings.HasPrefix(h.Key, ":") { // Skip pseudo-headers, already processed
+			tx.AddRequestHeader(h.Key, string(h.RawValue))
+		}
+	}
 
 	interruption := tx.ProcessRequestHeaders()
 	if interruption != nil {

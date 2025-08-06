@@ -479,42 +479,19 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 
 	log.Printf("WAF allowed request headers - checking if body processing needed")
 
-	// Check if we need to process the request body
-	hasBody := false
-	for _, header := range headers.Headers.Headers {
-		if header == nil {
-			continue
-		}
-		headerKeyLower := strings.ToLower(header.Key)
-		if headerKeyLower == "content-length" && string(header.RawValue) != "0" {
-			hasBody = true
-			log.Printf("Found Content-Length: %s - body processing needed", string(header.RawValue))
-			break
-		}
-		if headerKeyLower == "transfer-encoding" && strings.Contains(strings.ToLower(string(header.RawValue)), "chunked") {
-			hasBody = true
-			log.Printf("Found chunked transfer encoding - body processing needed")
-			break
-		}
-	}
+	// Always keep the transaction alive for potential body processing
+	// Envoy Gateway may send body requests even for GET requests or requests without explicit Content-Length
+	log.Printf("Keeping transaction alive for potential body processing")
 
-	if hasBody {
-		log.Printf("Request has body - keeping transaction alive for body processing")
-		return &envoy_service_ext_proc_v3.ProcessingResponse{
-			Response: &envoy_service_ext_proc_v3.ProcessingResponse_RequestHeaders{
-				RequestHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
-					Response: &envoy_service_ext_proc_v3.CommonResponse{
-						Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
-					},
+	return &envoy_service_ext_proc_v3.ProcessingResponse{
+		Response: &envoy_service_ext_proc_v3.ProcessingResponse_RequestHeaders{
+			RequestHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
+				Response: &envoy_service_ext_proc_v3.CommonResponse{
+					Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
 				},
 			},
-		}
+		},
 	}
-
-	log.Printf("Request has no body - processing complete")
-	// Clean up transaction since we don't need it anymore
-	c.removeStreamInfo(streamID)
-	return c.continueRequest()
 }
 
 func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
@@ -527,8 +504,9 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 
 	streamInfo := c.getStreamInfo(streamID)
 	if streamInfo == nil {
-		log.Printf("ERROR: No stream info found for stream %s", streamID)
+		log.Printf("ERROR: No stream info found for stream %s - this should not happen!", streamID)
 		c.logAllStreams()
+		// Don't fail completely, just continue - this might be an empty body request
 		return c.continueRequestBody()
 	}
 
@@ -542,7 +520,7 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 	log.Printf("Processing body chunk of size: %d bytes", len(body.Body))
 	log.Printf("End of stream: %t", body.EndOfStream)
 
-	// Write body data to transaction
+	// Write body data to transaction (even if empty - this is expected for GET requests)
 	if len(body.Body) > 0 {
 		log.Printf("Writing body data to WAF transaction...")
 		if _, _, err := tx.WriteRequestBody(body.Body); err != nil {
@@ -551,13 +529,15 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 			return c.continueRequestBody()
 		}
 		log.Printf("Successfully wrote %d bytes to transaction", len(body.Body))
+	} else {
+		log.Printf("Empty body chunk received (normal for GET requests)")
 	}
 
 	// If this is the end of the stream, process the complete body
 	if body.EndOfStream {
 		log.Printf("End of stream reached - processing complete request body through WAF...")
 
-		// Process the complete request body
+		// Process the complete request body (even if empty)
 		if it, err := tx.ProcessRequestBody(); err != nil {
 			log.Printf("Failed to process request body: %v", err)
 		} else if it != nil {
@@ -664,7 +644,7 @@ func main() {
 	}
 
 	log.SetOutput(os.Stdout)
-	log.Printf("=== Starting Coraza ext_proc server 8/5 9:47PM (FIXED) ===")
+	log.Printf("=== Starting Coraza ext_proc server 8/5 11:26PM ===")
 	log.Printf("Port: %s", port)
 	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))
 

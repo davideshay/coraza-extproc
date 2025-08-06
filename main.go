@@ -143,7 +143,7 @@ func (c *CorazaExtProc) loadConfigFromDirectory() error {
 
 func (c *CorazaExtProc) watchConfigDirectory() {
 	// Add the config directory to the watcher
-	if err := c.watcher.Add(c.confDir); err != nil {
+	if err := c.watcher.Add(filepath.Join(c.confDir,"..data")); err != nil {
 		log.Printf("Failed to add configuration directory to watcher: %v", err)
 		return
 	}
@@ -687,7 +687,7 @@ func main() {
 	}
 
 	log.SetOutput(os.Stdout)
-	log.Printf("=== Starting Coraza ext_proc server 8/6 10:00AM ===")
+	log.Printf("=== Starting Coraza ext_proc server 8/6 1:00PM ===")
 	log.Printf("Port: %s", port)
 	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))
 

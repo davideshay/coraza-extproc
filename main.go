@@ -235,11 +235,49 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 	return nil
 }
 
+// Get stream ID from request attributes or fallback methods
+func (c *CorazaExtProc) getStreamIDFromRequest(req *envoy_service_ext_proc_v3.ProcessingRequest) string {
+	// Method 1: Try to get request.id from attributes (only available in RequestHeaders)
+	if req != nil {
+		switch r := req.Request.(type) {
+		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestHeaders:
+			if r.RequestHeaders != nil && r.RequestHeaders.Attributes != nil {
+				// Look for request.id in attributes
+				if requestIdStruct, exists := r.RequestHeaders.Attributes["request.id"]; exists && requestIdStruct != nil {
+					if requestIdStruct.Fields != nil {
+						// Try to get string value from the struct fields
+						for fieldKey, fieldValue := range requestIdStruct.Fields {
+							if stringVal := fieldValue.GetStringValue(); stringVal != "" {
+								log.Printf("Using request.id field '%s' from request headers attributes as stream ID: %s", fieldKey, stringVal)
+								return stringVal
+							}
+						}
+					}
+				}
+
+				// Log all available attributes for debugging
+				attrKeys := make([]string, 0, len(r.RequestHeaders.Attributes))
+				for key := range r.RequestHeaders.Attributes {
+					attrKeys = append(attrKeys, key)
+				}
+				log.Printf("Available request headers attributes: %v", attrKeys)
+			}
+		}
+	}
+
+	return ""
+}
+
 // Improved stream ID generation with multiple fallback methods
-func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) string {
+func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer, req *envoy_service_ext_proc_v3.ProcessingRequest) string {
+	// Method 1: Try request attributes first
+	if streamID := c.getStreamIDFromRequest(req); streamID != "" {
+		return streamID
+	}
+
 	ctx := stream.Context()
 
-	// Method 1: Try gRPC metadata
+	// Method 2: Try gRPC metadata
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		// Look for x-request-id first
 		if requestIds, exists := md["x-request-id"]; exists && len(requestIds) > 0 {
@@ -264,10 +302,18 @@ func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalPro
 		}
 	}
 
-	// Method 2: Use context pointer as consistent identifier
+	// Method 3: Use context pointer as consistent identifier
 	streamPtr := fmt.Sprintf("%p", ctx)
 	log.Printf("Using context pointer as stream ID: %s", streamPtr)
 	return streamPtr
+}
+
+func getAttributeKeys(attrs map[string]*envoy_config_core_v3.HeaderValue) []string {
+	keys := make([]string, 0, len(attrs))
+	for key := range attrs {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func getMetadataKeys(md metadata.MD) []string {
@@ -322,20 +368,33 @@ func (c *CorazaExtProc) logAllStreams() {
 
 func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) error {
 	log.Printf("=== New gRPC stream connection ===")
-	streamID := c.getStreamID(stream)
-	log.Printf("Stream ID: %s", streamID)
+
+	// We'll determine the stream ID from the first request
+	var streamID string
 
 	// Ensure cleanup happens when stream ends
 	defer func() {
-		log.Printf("Stream %s ending - cleaning up", streamID)
-		c.removeStreamInfo(streamID)
+		if streamID != "" {
+			log.Printf("Stream %s ending - cleaning up", streamID)
+			c.removeStreamInfo(streamID)
+		}
 	}()
 
 	for {
 		req, err := stream.Recv()
 		if err != nil {
-			log.Printf("Error receiving from stream %s: %v", streamID, err)
+			if streamID != "" {
+				log.Printf("Error receiving from stream %s: %v", streamID, err)
+			} else {
+				log.Printf("Error receiving from stream: %v", err)
+			}
 			return err
+		}
+
+		// Get stream ID from the first request if we don't have it yet
+		if streamID == "" {
+			streamID = c.getStreamID(stream, req)
+			log.Printf("Stream ID: %s", streamID)
 		}
 
 		log.Printf("Received request type for stream %s: %T", streamID, req.Request)
@@ -530,10 +589,10 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 		}
 		log.Printf("Successfully wrote %d bytes to transaction", len(body.Body))
 	} else {
-		log.Printf("Empty body chunk received (normal for GET requests)")
+		log.Printf("Empty body chunk received (normal for GET requests or body streaming)")
 	}
 
-	// If this is the end of the stream, process the complete body
+	// Only process and cleanup when we reach the end of the stream
 	if body.EndOfStream {
 		log.Printf("End of stream reached - processing complete request body through WAF...")
 
@@ -549,7 +608,8 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 		log.Printf("WAF allowed request body - request processing complete")
 		c.removeStreamInfo(streamID)
 	} else {
-		log.Printf("More body data expected - continuing...")
+		log.Printf("More body data expected - keeping transaction alive for next chunk...")
+		// Don't remove the stream info - we need it for subsequent body chunks
 	}
 
 	return c.continueRequestBody()
@@ -644,7 +704,7 @@ func main() {
 	}
 
 	log.SetOutput(os.Stdout)
-	log.Printf("=== Starting Coraza ext_proc server 8/5 11:26PM ===")
+	log.Printf("=== Starting Coraza ext_proc server 8/5 9:47PM (FIXED) ===")
 	log.Printf("Port: %s", port)
 	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"crypto/sha256"
 
 	"github.com/corazawaf/coraza/v3"
 	"github.com/corazawaf/coraza/v3/types"
@@ -142,46 +143,34 @@ func (c *CorazaExtProc) loadConfigFromDirectory() error {
 }
 
 func (c *CorazaExtProc) watchConfigDirectory() {
-	// Add the config directory to the watcher
-	if err := c.watcher.Add(filepath.Join(c.confDir,"..data")); err != nil {
-		log.Printf("Failed to add configuration directory to watcher: %v", err)
-		return
-	}
+	previousHashes := make(map[string][32]byte)
 
-	// Start a ticker to periodically reload config (fallback in case fsnotify misses events)
-	ticker := time.NewTicker(600 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case event, ok := <-c.watcher.Events:
-			if !ok {
-				return
+	for range ticker.C {
+		changed := false
+
+		filepath.WalkDir(c.confDir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".conf") {
+				return nil
 			}
-
-			// Only process .conf files
-			if !strings.HasSuffix(event.Name, ".conf") {
-				continue
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return nil
 			}
+			hash := sha256.Sum256(content)
+			if oldHash, exists := previousHashes[path]; !exists || oldHash != hash {
+				log.Printf("Detected config file change: %s", path)
+				previousHashes[path] = hash
+				changed = true
+			}
+			return nil
+		})
 
-			log.Printf("Conf file change detected: %s (%s)", event.Name, event.Op)
-
-			// Reload all config after a short delay to batch multiple changes
-			time.Sleep(100 * time.Millisecond)
+		if changed {
 			if err := c.loadConfigFromDirectory(); err != nil {
 				log.Printf("Failed to reload config: %v", err)
-			}
-
-		case err, ok := <-c.watcher.Errors:
-			if !ok {
-				return
-			}
-			log.Printf("Watcher error: %v", err)
-
-		case <-ticker.C:
-			// Periodic reload as fallback
-			if err := c.loadConfigFromDirectory(); err != nil {
-				log.Printf("Failed to reload config during periodic check: %v", err)
 			}
 		}
 	}

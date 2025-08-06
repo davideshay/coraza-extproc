@@ -9,8 +9,8 @@ WORKDIR /app
 
 RUN git clone --depth 1 --branch v4.0.0 https://github.com/corazawaf/coraza-coreruleset.git /opt/owasp-crs && \
     mkdir -p /etc/coraza/conf && \
-    cp -r /opt/owasp-crs/rules/ /etc/coraza/ && \
-    cp /opt/owasp-crs/rules/@crs-setup.conf.example /etc/coraza/crs-setup.conf
+    cp -r /opt/owasp-crs/rules/. /etc/coraza/ && \
+    cp /opt/owasp-crs/rules/@crs-setup.conf.example /etc/coraza/crs-setup-conf
 
 # Copy go mod files first for better layer caching
 COPY go.mod go.sum ./

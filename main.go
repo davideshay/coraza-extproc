@@ -29,7 +29,8 @@ type CorazaExtProc struct {
 	streamData   map[string]*StreamInfo       // stream ID -> stream info
 	mutex        sync.RWMutex
 	txMutex      sync.RWMutex
-	rulesDir     string
+	baseDir      string
+	confDir		 string
 	watcher      *fsnotify.Watcher
 }
 
@@ -43,9 +44,14 @@ type StreamInfo struct {
 }
 
 func NewCorazaExtProc() (*CorazaExtProc, error) {
-	rulesDir := os.Getenv("RULES_DIR")
-	if rulesDir == "" {
-		rulesDir = "/etc/coraza/rules"
+	baseDir := os.Getenv("BASE_DIR")
+	if baseDir == "" {
+		baseDir = "/etc/coraza/"
+	}
+
+	confDir := os.Getenv("CONF_DIR")
+	if confDir == "" {
+		confDir = baseDir + "conf"
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -57,7 +63,8 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 		wafEngines:   make(map[string]coraza.WAF),
 		transactions: make(map[string]types.Transaction),
 		streamData:   make(map[string]*StreamInfo),
-		rulesDir:     rulesDir,
+		baseDir:      baseDir,
+		confDir:	  confDir,
 		watcher:      watcher,
 	}
 
@@ -81,15 +88,15 @@ func (c *CorazaExtProc) loadRulesFromDirectory() error {
 	c.wafEngines = make(map[string]coraza.WAF)
 	c.mutex.Unlock()
 
-	// Walk through the rules directory
-	return filepath.WalkDir(c.rulesDir, func(path string, d fs.DirEntry, err error) error {
+	// Walk through the conf directory
+	return filepath.WalkDir(c.confDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			log.Printf("Error accessing path %s: %v", path, err)
 			return nil // Continue walking
 		}
 
 		// Skip processing ALL files and the tree inside hidden directories (k8s config mounts)
-		if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != c.rulesDir {
+		if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != c.confDir {
 			return filepath.SkipDir
 		}
 
@@ -101,16 +108,17 @@ func (c *CorazaExtProc) loadRulesFromDirectory() error {
 		// Extract domain from filename (e.g., "example.com.conf" -> "example.com")
 		domain := strings.TrimSuffix(d.Name(), ".conf")
 
-		// Read rules file
-		rulesContent, err := os.ReadFile(path)
+		// Read conf file
+		confContent, err := os.ReadFile(path)
 		if err != nil {
-			log.Printf("Failed to read rules file %s: %v", path, err)
+			log.Printf("Failed to read config file %s: %v", path, err)
 			return nil
 		}
 
 		// Create WAF engine
 		waf, err := coraza.NewWAF(coraza.NewWAFConfig().
-			WithDirectives(string(rulesContent)))
+			WithRootFS(os.DirFS(c.baseDir)).
+			WithDirectives(string(confContent)))
 		if err != nil {
 			log.Printf("Failed to create WAF for domain %s: %v", domain, err)
 			return nil
@@ -127,8 +135,8 @@ func (c *CorazaExtProc) loadRulesFromDirectory() error {
 
 func (c *CorazaExtProc) watchRulesDirectory() {
 	// Add the rules directory to the watcher
-	if err := c.watcher.Add(c.rulesDir); err != nil {
-		log.Printf("Failed to add rules directory to watcher: %v", err)
+	if err := c.watcher.Add(c.confDir); err != nil {
+		log.Printf("Failed to add configuration directory to watcher: %v", err)
 		return
 	}
 
@@ -258,67 +266,13 @@ func (c *CorazaExtProc) getStreamIDFromRequest(req *envoy_service_ext_proc_v3.Pr
 	if req != nil {
 		switch r := req.Request.(type) {
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestHeaders:
-			if r.RequestHeaders != nil {
-				// Log headers for debugging
-				log.Printf("=== DEBUG: Request Headers Analysis ===")
-				if r.RequestHeaders.Headers != nil {
-					for _, header := range r.RequestHeaders.Headers.Headers {
-						if header != nil {
-							log.Printf("Header: %s = %s", header.Key, string(header.RawValue))
-						}
-					}
-				}
-				
-				// Check attributes in detail
-				if r.RequestHeaders.Attributes != nil {
-					log.Printf("=== DEBUG: Attributes Analysis ===")
-					log.Printf("Attributes map has %d entries", len(r.RequestHeaders.Attributes))
-					
-					for attrKey, attrStruct := range r.RequestHeaders.Attributes {
-						log.Printf("Attribute key: '%s'", attrKey)
-						if attrStruct != nil {
-							log.Printf("  Struct is not nil")
-							if attrStruct.Fields != nil {
-								log.Printf("  Fields map has %d entries", len(attrStruct.Fields))
-								for fieldKey, fieldValue := range attrStruct.Fields {
-									log.Printf("    Field: '%s'", fieldKey)
-									if fieldValue != nil {
-										log.Printf("      Type: %T", fieldValue)
-										// Try to get string value using the getter method
-										if stringVal := fieldValue.GetStringValue(); stringVal != "" {
-											log.Printf("      String value: '%s'", stringVal)
-											// Check for request.id variations
-											if attrKey == "request.id" || attrKey == "request_id" || 
-											   strings.Contains(attrKey, "request") && strings.Contains(attrKey, "id") {
-												log.Printf("Using attribute '%s' field '%s' as stream ID: %s", attrKey, fieldKey, stringVal)
-												return stringVal
-											}
-										} else if numVal := fieldValue.GetNumberValue(); numVal != 0 {
-											log.Printf("      Number value: %f", numVal)
-										} else {
-											log.Printf("      Other type or nil value")
-										}
-									}
-								}
-							} else {
-								log.Printf("  Fields is nil")
-							}
-						} else {
-							log.Printf("  Struct is nil")
-						}
-					}
-				} else {
-					log.Printf("No attributes found in request headers")
-				}
-				
-				// Also check if there are any headers that might contain request ID
+			if r.RequestHeaders != nil {				
 				if r.RequestHeaders.Headers != nil {
 					for _, header := range r.RequestHeaders.Headers.Headers {
 						if header != nil {
 							headerKey := strings.ToLower(header.Key)
 							headerValue := string(header.RawValue)
-							if strings.Contains(headerKey, "request") && strings.Contains(headerKey, "id") ||
-							   headerKey == "x-request-id" || headerKey == "x-trace-id" {
+							if headerKey == "x-request-id" || headerKey == "x-trace-id" {
 								log.Printf("Found potential request ID in headers: %s = %s", header.Key, headerValue)
 								return headerValue
 							}
@@ -328,7 +282,6 @@ func (c *CorazaExtProc) getStreamIDFromRequest(req *envoy_service_ext_proc_v3.Pr
 			}
 		}
 	}
-
 	return ""
 }
 
@@ -341,32 +294,7 @@ func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalPro
 
 	ctx := stream.Context()
 
-	// Method 2: Try gRPC metadata
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		// Look for x-request-id first
-		if requestIds, exists := md["x-request-id"]; exists && len(requestIds) > 0 {
-			log.Printf("Using x-request-id as stream ID: %s", requestIds[0])
-			return requestIds[0]
-		}
-
-		// Look for x-trace-id
-		if traceIds, exists := md["x-trace-id"]; exists && len(traceIds) > 0 {
-			log.Printf("Using x-trace-id as stream ID: %s", traceIds[0])
-			return traceIds[0]
-		}
-
-		// Look for any other unique identifier in metadata
-		for key, values := range md {
-			if strings.Contains(key, "request") || strings.Contains(key, "trace") || strings.Contains(key, "id") {
-				if len(values) > 0 && values[0] != "" {
-					log.Printf("Using metadata %s as stream ID: %s", key, values[0])
-					return values[0]
-				}
-			}
-		}
-	}
-
-	// Method 3: Use context pointer as consistent identifier
+	// Method 2: Use context pointer as consistent identifier
 	streamPtr := fmt.Sprintf("%p", ctx)
 	log.Printf("Using context pointer as stream ID: %s", streamPtr)
 	return streamPtr
@@ -611,7 +539,6 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 		streamInfo.LastActivity = time.Now()
 	}
 
-	// Rest of your existing processRequestBody logic...
 	if body == nil {
 		log.Printf("ERROR: body is nil")
 		return c.continueRequestBody()
@@ -752,7 +679,7 @@ func main() {
 	}
 
 	log.SetOutput(os.Stdout)
-	log.Printf("=== Starting Coraza ext_proc server 8/6 9:00AM ===")
+	log.Printf("=== Starting Coraza ext_proc server 8/6 10:00AM ===")
 	log.Printf("Port: %s", port)
 	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))
 
@@ -773,7 +700,7 @@ func main() {
 	envoy_service_ext_proc_v3.RegisterExternalProcessorServer(s, processor)
 	log.Printf("gRPC server created and ext_proc service registered")
 
-	log.Printf("Watching rules directory: %s", processor.rulesDir)
+	log.Printf("Watching config directory: %s", processor.confDir)
 	processor.logAvailableEngines()
 
 	log.Printf("=== Server ready - waiting for connections ===")

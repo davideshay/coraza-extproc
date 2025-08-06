@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unsafe"
 
 	"github.com/corazawaf/coraza/v3"
 	"github.com/corazawaf/coraza/v3/types"
@@ -20,12 +19,13 @@ import (
 	envoy_type_v3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/fsnotify/fsnotify"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 type CorazaExtProc struct {
 	envoy_service_ext_proc_v3.UnimplementedExternalProcessorServer
 	wafEngines   map[string]coraza.WAF // domain -> WAF engine
-	transactions map[uintptr]types.Transaction // stream pointer -> transaction
+	transactions map[string]types.Transaction // stream ID -> transaction
 	mutex        sync.RWMutex
 	txMutex      sync.RWMutex
 	rulesDir     string
@@ -45,7 +45,7 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 
 	processor := &CorazaExtProc{
 		wafEngines:   make(map[string]coraza.WAF),
-		transactions: make(map[uintptr]types.Transaction),
+		transactions: make(map[string]types.Transaction),
 		rulesDir:     rulesDir,
 		watcher:      watcher,
 	}
@@ -119,7 +119,7 @@ func (c *CorazaExtProc) watchRulesDirectory() {
 	}
 
 	// Start a ticker to periodically reload rules (fallback in case fsnotify misses events)
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(600 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -203,25 +203,55 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 	return nil
 }
 
-func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) uintptr {
-	// Use the stream pointer as a unique identifier
-	// This should remain consistent throughout the request lifecycle
-	return uintptr(unsafe.Pointer(&stream))
+func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) string {
+	// Get stream context and check for metadata that can identify the stream
+	ctx := stream.Context()
+	
+	// Try to get gRPC metadata
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		// Look for common Envoy headers that identify the request
+		if requestIds, exists := md["x-request-id"]; exists && len(requestIds) > 0 {
+			log.Printf("Using x-request-id as stream ID: %s", requestIds[0])
+			return requestIds[0]
+		}
+		
+		// Look for other potential identifiers
+		if traceIds, exists := md["x-trace-id"]; exists && len(traceIds) > 0 {
+			log.Printf("Using x-trace-id as stream ID: %s", traceIds[0])
+			return traceIds[0]
+		}
+		
+		// Log all metadata for debugging
+		log.Printf("Available gRPC metadata keys: %v", getMetadataKeys(md))
+	}
+	
+	// Fallback to using context value (should be consistent per stream)
+	streamPtr := fmt.Sprintf("%p", ctx)
+	log.Printf("Using context pointer as stream ID: %s", streamPtr)
+	return streamPtr
 }
 
-func (c *CorazaExtProc) getTransaction(streamID uintptr) types.Transaction {
+func getMetadataKeys(md metadata.MD) []string {
+	keys := make([]string, 0, len(md))
+	for key := range md {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func (c *CorazaExtProc) getTransaction(streamID string) types.Transaction {
 	c.txMutex.RLock()
 	defer c.txMutex.RUnlock()
 	return c.transactions[streamID]
 }
 
-func (c *CorazaExtProc) setTransaction(streamID uintptr, tx types.Transaction) {
+func (c *CorazaExtProc) setTransaction(streamID string, tx types.Transaction) {
 	c.txMutex.Lock()
 	defer c.txMutex.Unlock()
 	c.transactions[streamID] = tx
 }
 
-func (c *CorazaExtProc) removeTransaction(streamID uintptr) {
+func (c *CorazaExtProc) removeTransaction(streamID string) {
 	c.txMutex.Lock()
 	defer c.txMutex.Unlock()
 	if tx, exists := c.transactions[streamID]; exists {
@@ -232,11 +262,15 @@ func (c *CorazaExtProc) removeTransaction(streamID uintptr) {
 
 func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) error {
 	log.Printf("=== New gRPC stream connection ===")
+	streamID := c.getStreamID(stream)
+	log.Printf("Stream ID: %s", streamID)
 
 	for {
 		req, err := stream.Recv()
 		if err != nil {
 			log.Printf("Error receiving from stream: %v", err)
+			// Clean up transaction on stream end
+			c.removeTransaction(streamID)
 			return err
 		}
 
@@ -262,13 +296,13 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 			} else {
 				log.Printf("ERROR: RequestHeaders is nil")
 			}
-			resp = c.processRequestHeaders(r.RequestHeaders, stream)
+			resp = c.processRequestHeaders(r.RequestHeaders, streamID)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestBody:
 			log.Printf("Processing RequestBody")
-			resp = c.processRequestBody(r.RequestBody, stream)
+			resp = c.processRequestBody(r.RequestBody, streamID)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_ResponseHeaders:
 			log.Printf("Processing ResponseHeaders")
-			resp = c.processResponseHeaders(r.ResponseHeaders, stream)
+			resp = c.processResponseHeaders(r.ResponseHeaders, streamID)
 		default:
 			log.Printf("Unknown request type, sending continue response")
 			resp = &envoy_service_ext_proc_v3.ProcessingResponse{
@@ -283,14 +317,15 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 		log.Printf("Sending response type: %T", resp.Response)
 		if err := stream.Send(resp); err != nil {
 			log.Printf("Error sending response: %v", err)
+			c.removeTransaction(streamID)
 			return err
 		}
 		log.Printf("Response sent successfully")
 	}
 }
 
-func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) *envoy_service_ext_proc_v3.ProcessingResponse {
-	log.Printf("=== Processing Request Headers ===")
+func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
+	log.Printf("=== Processing Request Headers for stream: %s ===", streamID)
 
 	// Check if headers structure exists
 	if headers == nil {
@@ -322,25 +357,15 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 			log.Printf("Header[%d]: NIL HEADER", i)
 			continue
 		}
-		log.Printf("Header[%d]: Key='%s' (len=%d), Value='%s' (len=%d)",
-			i, header.Key, len(header.Key), header.RawValue, len(header.RawValue))
-
-		// Only log bytes for first few headers to reduce noise
-		if i < 3 {
-			log.Printf("  Key bytes: %v", []byte(header.Key))
-			log.Printf("  Value bytes: %v", []byte(header.RawValue))
-		}
 	}
 
 	// Extract authority/host with more detailed logging
 	var authority string
-	log.Printf("Searching for authority/host header...")
-	for i, header := range headers.Headers.Headers {
+	for _, header := range headers.Headers.Headers {
 		if header == nil {
 			continue
 		}
 		headerKeyLower := strings.ToLower(header.Key)
-		log.Printf("Checking header[%d]: '%s' (lowercase: '%s')", i, header.Key, headerKeyLower)
 
 		if headerKeyLower == ":authority" || headerKeyLower == "host" {
 			authority = string(header.RawValue)
@@ -368,7 +393,6 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 
 	// Create transaction and store it for later use in body processing
 	tx := waf.NewTransaction()
-	streamID := c.getStreamID(stream)
 	c.setTransaction(streamID, tx)
 
 	// Extract method, URI, protocol with detailed logging
@@ -394,7 +418,6 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		}
 	}
 
-	log.Printf("Request details - Method: %s, URI: %s, Protocol: %s", method, uri, protocol)
 	if method == "" || uri == "" || protocol == "" {
 		log.Printf("Missing required pseudo-headers: method=%s uri=%s protocol=%s", method, uri, protocol)
 		return c.continueRequest()
@@ -404,7 +427,6 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	if method != "" && uri != "" {
 		log.Printf("Processing URI: %s", uri)
 		tx.ProcessURI(uri, method, protocol)
-		log.Printf("Completed processing URI")
 	}
 
 	// Process headers
@@ -412,7 +434,6 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		if strings.HasPrefix(header.Key, ":") {
 			continue // Skip pseudo headers for now
 		}
-		log.Printf("Adding request header: %s = %s", header.Key, string(header.RawValue))
 		tx.AddRequestHeader(header.Key, string(header.RawValue))
 	}
 
@@ -463,18 +484,17 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	return c.continueRequest()
 }
 
-func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody, stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) *envoy_service_ext_proc_v3.ProcessingResponse {
-	log.Printf("=== Processing Request Body ===")
+func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
+	log.Printf("=== Processing Request Body for stream: %s ===", streamID)
 
 	if body == nil {
 		log.Printf("ERROR: body is nil")
 		return c.continueRequestBody()
 	}
 
-	streamID := c.getStreamID(stream)
 	tx := c.getTransaction(streamID)
 	if tx == nil {
-		log.Printf("ERROR: No transaction found for stream %x", streamID)
+		log.Printf("ERROR: No transaction found for stream %s", streamID)
 		return c.continueRequestBody()
 	}
 
@@ -514,9 +534,8 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 	return c.continueRequestBody()
 }
 
-func (c *CorazaExtProc) processResponseHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) *envoy_service_ext_proc_v3.ProcessingResponse {
+func (c *CorazaExtProc) processResponseHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
 	// Clean up any remaining transactions for this stream
-	streamID := c.getStreamID(stream)
 	c.removeTransaction(streamID)
 	
 	return &envoy_service_ext_proc_v3.ProcessingResponse{

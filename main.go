@@ -26,10 +26,18 @@ type CorazaExtProc struct {
 	envoy_service_ext_proc_v3.UnimplementedExternalProcessorServer
 	wafEngines   map[string]coraza.WAF        // domain -> WAF engine
 	transactions map[string]types.Transaction // stream ID -> transaction
+	streamData   map[string]*StreamInfo       // stream ID -> stream info
 	mutex        sync.RWMutex
 	txMutex      sync.RWMutex
 	rulesDir     string
 	watcher      *fsnotify.Watcher
+}
+
+type StreamInfo struct {
+	StreamID    string
+	Authority   string
+	Transaction types.Transaction
+	CreatedAt   time.Time
 }
 
 func NewCorazaExtProc() (*CorazaExtProc, error) {
@@ -46,6 +54,7 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 	processor := &CorazaExtProc{
 		wafEngines:   make(map[string]coraza.WAF),
 		transactions: make(map[string]types.Transaction),
+		streamData:   make(map[string]*StreamInfo),
 		rulesDir:     rulesDir,
 		watcher:      watcher,
 	}
@@ -57,6 +66,9 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 
 	// Start watching for file changes
 	go processor.watchRulesDirectory()
+
+	// Start cleanup routine for orphaned transactions
+	go processor.cleanupRoutine()
 
 	return processor, nil
 }
@@ -157,6 +169,28 @@ func (c *CorazaExtProc) watchRulesDirectory() {
 	}
 }
 
+func (c *CorazaExtProc) cleanupRoutine() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		c.txMutex.Lock()
+		now := time.Now()
+		for streamID, streamInfo := range c.streamData {
+			// Clean up streams older than 5 minutes
+			if now.Sub(streamInfo.CreatedAt) > 5*time.Minute {
+				log.Printf("Cleaning up orphaned stream: %s", streamID)
+				if streamInfo.Transaction != nil {
+					streamInfo.Transaction.Close()
+				}
+				delete(c.streamData, streamID)
+				delete(c.transactions, streamID)
+			}
+		}
+		c.txMutex.Unlock()
+	}
+}
+
 func (c *CorazaExtProc) logAvailableEngines() {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
@@ -201,29 +235,36 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 	return nil
 }
 
+// Improved stream ID generation with multiple fallback methods
 func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) string {
-	// Get stream context and check for metadata that can identify the stream
 	ctx := stream.Context()
 
-	// Try to get gRPC metadata
+	// Method 1: Try gRPC metadata
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		// Look for common Envoy headers that identify the request
+		// Look for x-request-id first
 		if requestIds, exists := md["x-request-id"]; exists && len(requestIds) > 0 {
 			log.Printf("Using x-request-id as stream ID: %s", requestIds[0])
 			return requestIds[0]
 		}
 
-		// Look for other potential identifiers
+		// Look for x-trace-id
 		if traceIds, exists := md["x-trace-id"]; exists && len(traceIds) > 0 {
 			log.Printf("Using x-trace-id as stream ID: %s", traceIds[0])
 			return traceIds[0]
 		}
 
-		// Log all metadata for debugging
-		log.Printf("Available gRPC metadata keys: %v", getMetadataKeys(md))
+		// Look for any other unique identifier in metadata
+		for key, values := range md {
+			if strings.Contains(key, "request") || strings.Contains(key, "trace") || strings.Contains(key, "id") {
+				if len(values) > 0 && values[0] != "" {
+					log.Printf("Using metadata %s as stream ID: %s", key, values[0])
+					return values[0]
+				}
+			}
+		}
 	}
 
-	// Fallback to using context value (should be consistent per stream)
+	// Method 2: Use context pointer as consistent identifier
 	streamPtr := fmt.Sprintf("%p", ctx)
 	log.Printf("Using context pointer as stream ID: %s", streamPtr)
 	return streamPtr
@@ -237,25 +278,46 @@ func getMetadataKeys(md metadata.MD) []string {
 	return keys
 }
 
-func (c *CorazaExtProc) getTransaction(streamID string) types.Transaction {
+func (c *CorazaExtProc) getStreamInfo(streamID string) *StreamInfo {
 	c.txMutex.RLock()
 	defer c.txMutex.RUnlock()
-	return c.transactions[streamID]
+	return c.streamData[streamID]
 }
 
-func (c *CorazaExtProc) setTransaction(streamID string, tx types.Transaction) {
+func (c *CorazaExtProc) setStreamInfo(streamID string, info *StreamInfo) {
 	c.txMutex.Lock()
 	defer c.txMutex.Unlock()
-	c.transactions[streamID] = tx
+	c.streamData[streamID] = info
+	c.transactions[streamID] = info.Transaction
+	log.Printf("Stored stream info for ID: %s, total streams: %d", streamID, len(c.streamData))
 }
 
-func (c *CorazaExtProc) removeTransaction(streamID string) {
+func (c *CorazaExtProc) removeStreamInfo(streamID string) {
 	c.txMutex.Lock()
 	defer c.txMutex.Unlock()
-	if tx, exists := c.transactions[streamID]; exists {
-		tx.Close()
+	if info, exists := c.streamData[streamID]; exists {
+		if info.Transaction != nil {
+			info.Transaction.Close()
+		}
+		delete(c.streamData, streamID)
 		delete(c.transactions, streamID)
+		log.Printf("Removed stream info for ID: %s, remaining streams: %d", streamID, len(c.streamData))
 	}
+}
+
+func (c *CorazaExtProc) logAllStreams() {
+	c.txMutex.RLock()
+	defer c.txMutex.RUnlock()
+	log.Printf("=== Active Streams Debug ===")
+	if len(c.streamData) == 0 {
+		log.Printf("No active streams")
+		return
+	}
+	for streamID, info := range c.streamData {
+		log.Printf("Stream %s: Authority=%s, HasTransaction=%t, Age=%v",
+			streamID, info.Authority, info.Transaction != nil, time.Since(info.CreatedAt))
+	}
+	log.Printf("=== End Active Streams ===")
 }
 
 func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) error {
@@ -263,46 +325,36 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 	streamID := c.getStreamID(stream)
 	log.Printf("Stream ID: %s", streamID)
 
+	// Ensure cleanup happens when stream ends
+	defer func() {
+		log.Printf("Stream %s ending - cleaning up", streamID)
+		c.removeStreamInfo(streamID)
+	}()
+
 	for {
 		req, err := stream.Recv()
 		if err != nil {
-			log.Printf("Error receiving from stream: %v", err)
-			// Clean up transaction on stream end
-			c.removeTransaction(streamID)
+			log.Printf("Error receiving from stream %s: %v", streamID, err)
 			return err
 		}
 
-		log.Printf("Received request type: %T", req.Request)
-
-		// Log the raw request for debugging
-		if req.Request != nil {
-			log.Printf("Raw request details: %+v", req.Request)
-		}
+		log.Printf("Received request type for stream %s: %T", streamID, req.Request)
 
 		var resp *envoy_service_ext_proc_v3.ProcessingResponse
 
 		switch r := req.Request.(type) {
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestHeaders:
-			log.Printf("Processing RequestHeaders")
-			if r.RequestHeaders != nil {
-				log.Printf("RequestHeaders object exists")
-				if r.RequestHeaders.Headers != nil {
-					log.Printf("Headers field exists with %d headers", len(r.RequestHeaders.Headers.Headers))
-				} else {
-					log.Printf("ERROR: RequestHeaders.Headers is nil")
-				}
-			} else {
-				log.Printf("ERROR: RequestHeaders is nil")
-			}
+			log.Printf("Processing RequestHeaders for stream %s", streamID)
 			resp = c.processRequestHeaders(r.RequestHeaders, streamID)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestBody:
-			log.Printf("Processing RequestBody")
+			log.Printf("Processing RequestBody for stream %s", streamID)
+			c.logAllStreams() // Debug active streams
 			resp = c.processRequestBody(r.RequestBody, streamID)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_ResponseHeaders:
-			log.Printf("Processing ResponseHeaders")
+			log.Printf("Processing ResponseHeaders for stream %s", streamID)
 			resp = c.processResponseHeaders(r.ResponseHeaders, streamID)
 		default:
-			log.Printf("Unknown request type, sending continue response")
+			log.Printf("Unknown request type for stream %s, sending continue response", streamID)
 			resp = &envoy_service_ext_proc_v3.ProcessingResponse{
 				Response: &envoy_service_ext_proc_v3.ProcessingResponse_ImmediateResponse{
 					ImmediateResponse: &envoy_service_ext_proc_v3.ImmediateResponse{
@@ -312,13 +364,12 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 			}
 		}
 
-		log.Printf("Sending response type: %T", resp.Response)
+		log.Printf("Sending response type for stream %s: %T", streamID, resp.Response)
 		if err := stream.Send(resp); err != nil {
-			log.Printf("Error sending response: %v", err)
-			c.removeTransaction(streamID)
+			log.Printf("Error sending response for stream %s: %v", streamID, err)
 			return err
 		}
-		log.Printf("Response sent successfully")
+		log.Printf("Response sent successfully for stream %s", streamID)
 	}
 }
 
@@ -337,27 +388,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 
 	log.Printf("Total headers count: %d", len(headers.Headers.Headers))
 
-	// Check if this is an empty header configuration issue
-	emptyValueCount := 0
-	for _, header := range headers.Headers.Headers {
-		if header != nil && len(header.RawValue) == 0 {
-			emptyValueCount++
-		}
-	}
-
-	if emptyValueCount == len(headers.Headers.Headers) {
-		log.Printf("WARNING: ALL header values are empty! This suggests a configuration issue.")
-	}
-
-	// Log all headers for debugging with more detail
-	for i, header := range headers.Headers.Headers {
-		if header == nil {
-			log.Printf("Header[%d]: NIL HEADER", i)
-			continue
-		}
-	}
-
-	// Extract authority/host with more detailed logging
+	// Extract authority/host
 	var authority string
 	for _, header := range headers.Headers.Headers {
 		if header == nil {
@@ -389,11 +420,17 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 
 	log.Printf("Found WAF engine for authority: %s", authority)
 
-	// Create transaction and store it for later use in body processing
+	// Create transaction and store stream info
 	tx := waf.NewTransaction()
-	c.setTransaction(streamID, tx)
+	streamInfo := &StreamInfo{
+		StreamID:    streamID,
+		Authority:   authority,
+		Transaction: tx,
+		CreatedAt:   time.Now(),
+	}
+	c.setStreamInfo(streamID, streamInfo)
 
-	// Extract method, URI, protocol with detailed logging
+	// Extract method, URI, protocol
 	var method, uri, protocol string
 	log.Printf("Extracting request details...")
 	for _, header := range headers.Headers.Headers {
@@ -420,15 +457,13 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	}
 
 	// Set request line
-	if method != "" && uri != "" {
-		log.Printf("Processing URI: %s", uri)
-		tx.ProcessURI(uri, method, protocol)
-	}
+	log.Printf("Processing URI: %s", uri)
+	tx.ProcessURI(uri, method, protocol)
 
 	// Process headers
 	for _, header := range headers.Headers.Headers {
 		if strings.HasPrefix(header.Key, ":") {
-			continue // Skip pseudo headers for now
+			continue // Skip pseudo headers
 		}
 		tx.AddRequestHeader(header.Key, string(header.RawValue))
 	}
@@ -437,12 +472,12 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	log.Printf("Processing request headers through WAF...")
 	if it := tx.ProcessRequestHeaders(); it != nil {
 		log.Printf("WAF BLOCKED REQUEST - Action: %s, RuleID: %d", it.Action, it.RuleID)
-		// Clean up transaction since we're blocking
-		c.removeTransaction(streamID)
+		// Clean up since we're blocking
+		c.removeStreamInfo(streamID)
 		return c.createBlockResponse(it)
 	}
 
-	log.Printf("WAF allowed request headers - continuing to body processing if needed")
+	log.Printf("WAF allowed request headers - checking if body processing needed")
 
 	// Check if we need to process the request body
 	hasBody := false
@@ -453,16 +488,18 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		headerKeyLower := strings.ToLower(header.Key)
 		if headerKeyLower == "content-length" && string(header.RawValue) != "0" {
 			hasBody = true
+			log.Printf("Found Content-Length: %s - body processing needed", string(header.RawValue))
 			break
 		}
 		if headerKeyLower == "transfer-encoding" && strings.Contains(strings.ToLower(string(header.RawValue)), "chunked") {
 			hasBody = true
+			log.Printf("Found chunked transfer encoding - body processing needed")
 			break
 		}
 	}
 
 	if hasBody {
-		log.Printf("Request has body - requesting body processing")
+		log.Printf("Request has body - keeping transaction alive for body processing")
 		return &envoy_service_ext_proc_v3.ProcessingResponse{
 			Response: &envoy_service_ext_proc_v3.ProcessingResponse_RequestHeaders{
 				RequestHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
@@ -476,7 +513,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 
 	log.Printf("Request has no body - processing complete")
 	// Clean up transaction since we don't need it anymore
-	c.removeTransaction(streamID)
+	c.removeStreamInfo(streamID)
 	return c.continueRequest()
 }
 
@@ -488,12 +525,20 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 		return c.continueRequestBody()
 	}
 
-	tx := c.getTransaction(streamID)
-	if tx == nil {
-		log.Printf("ERROR: No transaction found for stream %s", streamID)
+	streamInfo := c.getStreamInfo(streamID)
+	if streamInfo == nil {
+		log.Printf("ERROR: No stream info found for stream %s", streamID)
+		c.logAllStreams()
 		return c.continueRequestBody()
 	}
 
+	if streamInfo.Transaction == nil {
+		log.Printf("ERROR: Stream info exists but transaction is nil for stream %s", streamID)
+		return c.continueRequestBody()
+	}
+
+	tx := streamInfo.Transaction
+	log.Printf("Successfully retrieved transaction for stream %s", streamID)
 	log.Printf("Processing body chunk of size: %d bytes", len(body.Body))
 	log.Printf("End of stream: %t", body.EndOfStream)
 
@@ -502,7 +547,7 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 		log.Printf("Writing body data to WAF transaction...")
 		if _, _, err := tx.WriteRequestBody(body.Body); err != nil {
 			log.Printf("Failed to write request body: %v", err)
-			c.removeTransaction(streamID)
+			c.removeStreamInfo(streamID)
 			return c.continueRequestBody()
 		}
 		log.Printf("Successfully wrote %d bytes to transaction", len(body.Body))
@@ -517,12 +562,12 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 			log.Printf("Failed to process request body: %v", err)
 		} else if it != nil {
 			log.Printf("WAF BLOCKED REQUEST BODY - Action: %s, RuleID: %d", it.Action, it.RuleID)
-			c.removeTransaction(streamID)
+			c.removeStreamInfo(streamID)
 			return c.createBlockResponse(it)
 		}
 
 		log.Printf("WAF allowed request body - request processing complete")
-		c.removeTransaction(streamID)
+		c.removeStreamInfo(streamID)
 	} else {
 		log.Printf("More body data expected - continuing...")
 	}
@@ -531,8 +576,8 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 }
 
 func (c *CorazaExtProc) processResponseHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
-	// Clean up any remaining transactions for this stream
-	c.removeTransaction(streamID)
+	// Clean up any remaining stream info for this stream
+	c.removeStreamInfo(streamID)
 
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ResponseHeaders{
@@ -594,23 +639,14 @@ func (c *CorazaExtProc) createBlockResponse(it *types.Interruption) *envoy_servi
 	}
 }
 
-func continueRequest() *envoy_service_ext_proc_v3.ProcessingResponse {
-	return &envoy_service_ext_proc_v3.ProcessingResponse{
-		Response: &envoy_service_ext_proc_v3.ProcessingResponse_RequestHeaders{
-			RequestHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
-				Response: &envoy_service_ext_proc_v3.CommonResponse{
-					Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
-				},
-			},
-		},
-	}
-}
-
 func (c *CorazaExtProc) Close() error {
-	// Clean up all transactions
+	// Clean up all stream info and transactions
 	c.txMutex.Lock()
-	for streamID, tx := range c.transactions {
-		tx.Close()
+	for streamID, info := range c.streamData {
+		if info.Transaction != nil {
+			info.Transaction.Close()
+		}
+		delete(c.streamData, streamID)
 		delete(c.transactions, streamID)
 	}
 	c.txMutex.Unlock()
@@ -628,7 +664,7 @@ func main() {
 	}
 
 	log.SetOutput(os.Stdout)
-	log.Printf("=== Starting Coraza ext_proc server 8/5 9:47PM ===")
+	log.Printf("=== Starting Coraza ext_proc server 8/5 9:47PM (FIXED) ===")
 	log.Printf("Port: %s", port)
 	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))
 

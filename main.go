@@ -24,7 +24,7 @@ import (
 
 type CorazaExtProc struct {
 	envoy_service_ext_proc_v3.UnimplementedExternalProcessorServer
-	wafEngines   map[string]coraza.WAF // domain -> WAF engine
+	wafEngines   map[string]coraza.WAF        // domain -> WAF engine
 	transactions map[string]types.Transaction // stream ID -> transaction
 	mutex        sync.RWMutex
 	txMutex      sync.RWMutex
@@ -174,8 +174,6 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
-	log.Printf("Looking for WAF engine for authority: %s", authority)
-
 	// Try exact match first
 	if waf, exists := c.wafEngines[authority]; exists {
 		log.Printf("Found exact match for: %s", authority)
@@ -206,7 +204,7 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) string {
 	// Get stream context and check for metadata that can identify the stream
 	ctx := stream.Context()
-	
+
 	// Try to get gRPC metadata
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		// Look for common Envoy headers that identify the request
@@ -214,17 +212,17 @@ func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalPro
 			log.Printf("Using x-request-id as stream ID: %s", requestIds[0])
 			return requestIds[0]
 		}
-		
+
 		// Look for other potential identifiers
 		if traceIds, exists := md["x-trace-id"]; exists && len(traceIds) > 0 {
 			log.Printf("Using x-trace-id as stream ID: %s", traceIds[0])
 			return traceIds[0]
 		}
-		
+
 		// Log all metadata for debugging
 		log.Printf("Available gRPC metadata keys: %v", getMetadataKeys(md))
 	}
-	
+
 	// Fallback to using context value (should be consistent per stream)
 	streamPtr := fmt.Sprintf("%p", ctx)
 	log.Printf("Using context pointer as stream ID: %s", streamPtr)
@@ -398,13 +396,11 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	// Extract method, URI, protocol with detailed logging
 	var method, uri, protocol string
 	log.Printf("Extracting request details...")
-	for i, header := range headers.Headers.Headers {
+	for _, header := range headers.Headers.Headers {
 		if header == nil {
 			continue
 		}
 		headerKeyLower := strings.ToLower(header.Key)
-		log.Printf("Checking header[%d] for request details: '%s' = '%s'", i, header.Key, header.RawValue)
-
 		switch headerKeyLower {
 		case ":method":
 			method = string(header.RawValue)
@@ -447,7 +443,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	}
 
 	log.Printf("WAF allowed request headers - continuing to body processing if needed")
-	
+
 	// Check if we need to process the request body
 	hasBody := false
 	for _, header := range headers.Headers.Headers {
@@ -515,7 +511,7 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 	// If this is the end of the stream, process the complete body
 	if body.EndOfStream {
 		log.Printf("End of stream reached - processing complete request body through WAF...")
-		
+
 		// Process the complete request body
 		if it, err := tx.ProcessRequestBody(); err != nil {
 			log.Printf("Failed to process request body: %v", err)
@@ -537,7 +533,7 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 func (c *CorazaExtProc) processResponseHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
 	// Clean up any remaining transactions for this stream
 	c.removeTransaction(streamID)
-	
+
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
@@ -632,7 +628,7 @@ func main() {
 	}
 
 	log.SetOutput(os.Stdout)
-	log.Printf("=== Starting Coraza ext_proc server ===")
+	log.Printf("=== Starting Coraza ext_proc server 8/5 9:47PM ===")
 	log.Printf("Port: %s", port)
 	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))
 

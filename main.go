@@ -49,9 +49,17 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 		baseDir = "/etc/coraza/"
 	}
 
+	if !strings.HasSuffix(baseDir,"/") {
+		baseDir = baseDir + "/"
+	}
+
 	confDir := os.Getenv("CONF_DIR")
 	if confDir == "" {
 		confDir = baseDir + "conf"
+	}
+
+	if !strings.HasSuffix(confDir,"/") {
+		confDir = confDir + "/"
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -69,12 +77,12 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 	}
 
 	// Load initial configurations
-	if err := processor.loadRulesFromDirectory(); err != nil {
-		log.Printf("Failed to load initial rules: %v", err)
+	if err := processor.loadConfigFromDirectory(); err != nil {
+		log.Printf("Failed to load initial config: %v", err)
 	}
 
 	// Start watching for file changes
-	go processor.watchRulesDirectory()
+	go processor.watchConfigDirectory()
 
 	// Start cleanup routine for orphaned transactions
 	go processor.cleanupRoutine()
@@ -82,7 +90,7 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 	return processor, nil
 }
 
-func (c *CorazaExtProc) loadRulesFromDirectory() error {
+func (c *CorazaExtProc) loadConfigFromDirectory() error {
 	// Clear existing engines
 	c.mutex.Lock()
 	c.wafEngines = make(map[string]coraza.WAF)
@@ -133,14 +141,14 @@ func (c *CorazaExtProc) loadRulesFromDirectory() error {
 	})
 }
 
-func (c *CorazaExtProc) watchRulesDirectory() {
-	// Add the rules directory to the watcher
+func (c *CorazaExtProc) watchConfigDirectory() {
+	// Add the config directory to the watcher
 	if err := c.watcher.Add(c.confDir); err != nil {
 		log.Printf("Failed to add configuration directory to watcher: %v", err)
 		return
 	}
 
-	// Start a ticker to periodically reload rules (fallback in case fsnotify misses events)
+	// Start a ticker to periodically reload config (fallback in case fsnotify misses events)
 	ticker := time.NewTicker(600 * time.Second)
 	defer ticker.Stop()
 
@@ -156,12 +164,12 @@ func (c *CorazaExtProc) watchRulesDirectory() {
 				continue
 			}
 
-			log.Printf("Rules file change detected: %s (%s)", event.Name, event.Op)
+			log.Printf("Conf file change detected: %s (%s)", event.Name, event.Op)
 
-			// Reload all rules after a short delay to batch multiple changes
+			// Reload all config after a short delay to batch multiple changes
 			time.Sleep(100 * time.Millisecond)
-			if err := c.loadRulesFromDirectory(); err != nil {
-				log.Printf("Failed to reload rules: %v", err)
+			if err := c.loadConfigFromDirectory(); err != nil {
+				log.Printf("Failed to reload config: %v", err)
 			}
 
 		case err, ok := <-c.watcher.Errors:
@@ -172,8 +180,8 @@ func (c *CorazaExtProc) watchRulesDirectory() {
 
 		case <-ticker.C:
 			// Periodic reload as fallback
-			if err := c.loadRulesFromDirectory(); err != nil {
-				log.Printf("Failed to reload rules during periodic check: %v", err)
+			if err := c.loadConfigFromDirectory(); err != nil {
+				log.Printf("Failed to reload config during periodic check: %v", err)
 			}
 		}
 	}

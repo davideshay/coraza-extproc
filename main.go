@@ -34,10 +34,12 @@ type CorazaExtProc struct {
 }
 
 type StreamInfo struct {
-	StreamID    string
-	Authority   string
-	Transaction types.Transaction
-	CreatedAt   time.Time
+	StreamID     string
+	Authority    string
+	Transaction  types.Transaction
+	CreatedAt    time.Time
+	IsWebSocket  bool
+	LastActivity time.Time
 }
 
 func NewCorazaExtProc() (*CorazaExtProc, error) {
@@ -177,9 +179,25 @@ func (c *CorazaExtProc) cleanupRoutine() {
 		c.txMutex.Lock()
 		now := time.Now()
 		for streamID, streamInfo := range c.streamData {
-			// Clean up streams older than 5 minutes
-			if now.Sub(streamInfo.CreatedAt) > 5*time.Minute {
-				log.Printf("Cleaning up orphaned stream: %s", streamID)
+			var shouldCleanup bool
+			var reason string
+			
+			if streamInfo.IsWebSocket {
+				// WebSocket connections can be long-lived, use different timeout
+				if now.Sub(streamInfo.LastActivity) > 30*time.Minute {
+					shouldCleanup = true
+					reason = "WebSocket inactive for 30 minutes"
+				}
+			} else {
+				// Regular HTTP requests should complete quickly
+				if now.Sub(streamInfo.CreatedAt) > 5*time.Minute {
+					shouldCleanup = true
+					reason = "HTTP request older than 5 minutes"
+				}
+			}
+			
+			if shouldCleanup {
+				log.Printf("Cleaning up stream %s: %s", streamID, reason)
 				if streamInfo.Transaction != nil {
 					streamInfo.Transaction.Close()
 				}
@@ -237,30 +255,76 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 
 // Get stream ID from request attributes or fallback methods
 func (c *CorazaExtProc) getStreamIDFromRequest(req *envoy_service_ext_proc_v3.ProcessingRequest) string {
-	// Method 1: Try to get request.id from attributes (only available in RequestHeaders)
 	if req != nil {
 		switch r := req.Request.(type) {
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestHeaders:
-			if r.RequestHeaders != nil && r.RequestHeaders.Attributes != nil {
-				// Look for request.id in attributes
-				if requestIdStruct, exists := r.RequestHeaders.Attributes["request.id"]; exists && requestIdStruct != nil {
-					if requestIdStruct.Fields != nil {
-						// Try to get string value from the struct fields
-						for fieldKey, fieldValue := range requestIdStruct.Fields {
-							if stringVal := fieldValue.GetStringValue(); stringVal != "" {
-								log.Printf("Using request.id field '%s' from request headers attributes as stream ID: %s", fieldKey, stringVal)
-								return stringVal
+			if r.RequestHeaders != nil {
+				// Log headers for debugging
+				log.Printf("=== DEBUG: Request Headers Analysis ===")
+				if r.RequestHeaders.Headers != nil {
+					for _, header := range r.RequestHeaders.Headers.Headers {
+						if header != nil {
+							log.Printf("Header: %s = %s", header.Key, string(header.RawValue))
+						}
+					}
+				}
+				
+				// Check attributes in detail
+				if r.RequestHeaders.Attributes != nil {
+					log.Printf("=== DEBUG: Attributes Analysis ===")
+					log.Printf("Attributes map has %d entries", len(r.RequestHeaders.Attributes))
+					
+					for attrKey, attrStruct := range r.RequestHeaders.Attributes {
+						log.Printf("Attribute key: '%s'", attrKey)
+						if attrStruct != nil {
+							log.Printf("  Struct is not nil")
+							if attrStruct.Fields != nil {
+								log.Printf("  Fields map has %d entries", len(attrStruct.Fields))
+								for fieldKey, fieldValue := range attrStruct.Fields {
+									log.Printf("    Field: '%s'", fieldKey)
+									if fieldValue != nil {
+										log.Printf("      Type: %T", fieldValue)
+										// Try to get string value using the getter method
+										if stringVal := fieldValue.GetStringValue(); stringVal != "" {
+											log.Printf("      String value: '%s'", stringVal)
+											// Check for request.id variations
+											if attrKey == "request.id" || attrKey == "request_id" || 
+											   strings.Contains(attrKey, "request") && strings.Contains(attrKey, "id") {
+												log.Printf("Using attribute '%s' field '%s' as stream ID: %s", attrKey, fieldKey, stringVal)
+												return stringVal
+											}
+										} else if numVal := fieldValue.GetNumberValue(); numVal != 0 {
+											log.Printf("      Number value: %f", numVal)
+										} else {
+											log.Printf("      Other type or nil value")
+										}
+									}
+								}
+							} else {
+								log.Printf("  Fields is nil")
+							}
+						} else {
+							log.Printf("  Struct is nil")
+						}
+					}
+				} else {
+					log.Printf("No attributes found in request headers")
+				}
+				
+				// Also check if there are any headers that might contain request ID
+				if r.RequestHeaders.Headers != nil {
+					for _, header := range r.RequestHeaders.Headers.Headers {
+						if header != nil {
+							headerKey := strings.ToLower(header.Key)
+							headerValue := string(header.RawValue)
+							if strings.Contains(headerKey, "request") && strings.Contains(headerKey, "id") ||
+							   headerKey == "x-request-id" || headerKey == "x-trace-id" {
+								log.Printf("Found potential request ID in headers: %s = %s", header.Key, headerValue)
+								return headerValue
 							}
 						}
 					}
 				}
-
-				// Log all available attributes for debugging
-				attrKeys := make([]string, 0, len(r.RequestHeaders.Attributes))
-				for key := range r.RequestHeaders.Attributes {
-					attrKeys = append(attrKeys, key)
-				}
-				log.Printf("Available request headers attributes: %v", attrKeys)
 			}
 		}
 	}
@@ -333,9 +397,10 @@ func (c *CorazaExtProc) getStreamInfo(streamID string) *StreamInfo {
 func (c *CorazaExtProc) setStreamInfo(streamID string, info *StreamInfo) {
 	c.txMutex.Lock()
 	defer c.txMutex.Unlock()
+	info.LastActivity = time.Now()
 	c.streamData[streamID] = info
 	c.transactions[streamID] = info.Transaction
-	log.Printf("Stored stream info for ID: %s, total streams: %d", streamID, len(c.streamData))
+	log.Printf("Stored stream info for ID: %s (WebSocket: %t), total streams: %d", streamID, info.IsWebSocket, len(c.streamData))
 }
 
 func (c *CorazaExtProc) removeStreamInfo(streamID string) {
@@ -435,34 +500,38 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
 	log.Printf("=== Processing Request Headers for stream: %s ===", streamID)
 
-	// Check if headers structure exists
-	if headers == nil {
-		log.Printf("ERROR: headers is nil")
-		return c.continueRequest()
-	}
-	if headers.Headers == nil {
-		log.Printf("ERROR: headers.Headers is nil")
+	if headers == nil || headers.Headers == nil {
+		log.Printf("ERROR: headers structure is nil")
 		return c.continueRequest()
 	}
 
-	log.Printf("Total headers count: %d", len(headers.Headers.Headers))
-
-	// Extract authority/host
+	// Extract authority/host and detect WebSocket upgrade
 	var authority string
+	var isWebSocket bool
+	var connection, upgrade string
+
 	for _, header := range headers.Headers.Headers {
 		if header == nil {
 			continue
 		}
 		headerKeyLower := strings.ToLower(header.Key)
+		headerValue := strings.ToLower(string(header.RawValue))
 
-		if headerKeyLower == ":authority" || headerKeyLower == "host" {
+		switch headerKeyLower {
+		case ":authority", "host":
 			authority = string(header.RawValue)
-			log.Printf("FOUND authority header: %s = '%s'", header.Key, authority)
-			break
+		case "connection":
+			connection = headerValue
+		case "upgrade":
+			upgrade = headerValue
 		}
 	}
 
-	log.Printf("Extracted authority: %s", authority)
+	// Detect WebSocket upgrade request
+	if strings.Contains(connection, "upgrade") && upgrade == "websocket" {
+		isWebSocket = true
+		log.Printf("Detected WebSocket upgrade request for authority: %s", authority)
+	}
 
 	if authority == "" {
 		log.Printf("No authority found in headers - continuing request")
@@ -477,21 +546,20 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		return c.continueRequest()
 	}
 
-	log.Printf("Found WAF engine for authority: %s", authority)
-
-	// Create transaction and store stream info
+	// Create transaction and store stream info with WebSocket detection
 	tx := waf.NewTransaction()
 	streamInfo := &StreamInfo{
-		StreamID:    streamID,
-		Authority:   authority,
-		Transaction: tx,
-		CreatedAt:   time.Now(),
+		StreamID:     streamID,
+		Authority:    authority,
+		Transaction:  tx,
+		CreatedAt:    time.Now(),
+		IsWebSocket:  isWebSocket,
+		LastActivity: time.Now(),
 	}
 	c.setStreamInfo(streamID, streamInfo)
 
 	// Extract method, URI, protocol
 	var method, uri, protocol string
-	log.Printf("Extracting request details...")
 	for _, header := range headers.Headers.Headers {
 		if header == nil {
 			continue
@@ -500,13 +568,10 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		switch headerKeyLower {
 		case ":method":
 			method = string(header.RawValue)
-			log.Printf("Found method: '%s'", method)
 		case ":path":
 			uri = string(header.RawValue)
-			log.Printf("Found path: '%s'", uri)
 		case ":scheme":
 			protocol = string(header.RawValue)
-			log.Printf("Found scheme: '%s'", protocol)
 		}
 	}
 
@@ -516,7 +581,6 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	}
 
 	// Set request line
-	log.Printf("Processing URI: %s", uri)
 	tx.ProcessURI(uri, method, protocol)
 
 	// Process headers
@@ -528,34 +592,26 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	}
 
 	// Check if request should be blocked
-	log.Printf("Processing request headers through WAF...")
 	if it := tx.ProcessRequestHeaders(); it != nil {
 		log.Printf("WAF BLOCKED REQUEST - Action: %s, RuleID: %d", it.Action, it.RuleID)
-		// Clean up since we're blocking
 		c.removeStreamInfo(streamID)
 		return c.createBlockResponse(it)
 	}
 
-	log.Printf("WAF allowed request headers - checking if body processing needed")
-
-	// Always keep the transaction alive for potential body processing
-	// Envoy Gateway may send body requests even for GET requests or requests without explicit Content-Length
-	log.Printf("Keeping transaction alive for potential body processing")
-
-	return &envoy_service_ext_proc_v3.ProcessingResponse{
-		Response: &envoy_service_ext_proc_v3.ProcessingResponse_RequestHeaders{
-			RequestHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
-				Response: &envoy_service_ext_proc_v3.CommonResponse{
-					Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
-				},
-			},
-		},
-	}
+	log.Printf("WAF allowed request headers for %s (WebSocket: %t)", authority, isWebSocket)
+	return c.continueRequest()
 }
 
+// Update activity timestamp when processing body
 func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
 	log.Printf("=== Processing Request Body for stream: %s ===", streamID)
 
+	// Update activity timestamp
+	if streamInfo := c.getStreamInfo(streamID); streamInfo != nil {
+		streamInfo.LastActivity = time.Now()
+	}
+
+	// Rest of your existing processRequestBody logic...
 	if body == nil {
 		log.Printf("ERROR: body is nil")
 		return c.continueRequestBody()
@@ -563,9 +619,7 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 
 	streamInfo := c.getStreamInfo(streamID)
 	if streamInfo == nil {
-		log.Printf("ERROR: No stream info found for stream %s - this should not happen!", streamID)
-		c.logAllStreams()
-		// Don't fail completely, just continue - this might be an empty body request
+		log.Printf("ERROR: No stream info found for stream %s", streamID)
 		return c.continueRequestBody()
 	}
 
@@ -575,28 +629,18 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 	}
 
 	tx := streamInfo.Transaction
-	log.Printf("Successfully retrieved transaction for stream %s", streamID)
-	log.Printf("Processing body chunk of size: %d bytes", len(body.Body))
-	log.Printf("End of stream: %t", body.EndOfStream)
+	log.Printf("Processing body chunk of size: %d bytes (WebSocket: %t)", len(body.Body), streamInfo.IsWebSocket)
 
-	// Write body data to transaction (even if empty - this is expected for GET requests)
 	if len(body.Body) > 0 {
-		log.Printf("Writing body data to WAF transaction...")
 		if _, _, err := tx.WriteRequestBody(body.Body); err != nil {
 			log.Printf("Failed to write request body: %v", err)
 			c.removeStreamInfo(streamID)
 			return c.continueRequestBody()
 		}
-		log.Printf("Successfully wrote %d bytes to transaction", len(body.Body))
-	} else {
-		log.Printf("Empty body chunk received (normal for GET requests or body streaming)")
 	}
 
-	// Only process and cleanup when we reach the end of the stream
 	if body.EndOfStream {
-		log.Printf("End of stream reached - processing complete request body through WAF...")
-
-		// Process the complete request body (even if empty)
+		log.Printf("End of stream reached for stream %s", streamID)
 		if it, err := tx.ProcessRequestBody(); err != nil {
 			log.Printf("Failed to process request body: %v", err)
 		} else if it != nil {
@@ -605,11 +649,15 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 			return c.createBlockResponse(it)
 		}
 
-		log.Printf("WAF allowed request body - request processing complete")
-		c.removeStreamInfo(streamID)
-	} else {
-		log.Printf("More body data expected - keeping transaction alive for next chunk...")
-		// Don't remove the stream info - we need it for subsequent body chunks
+		// For WebSocket connections, don't remove stream info immediately
+		// as the connection might stay open for data exchange
+		if !streamInfo.IsWebSocket {
+			log.Printf("Removing stream info for completed HTTP request")
+			c.removeStreamInfo(streamID)
+		} else {
+			log.Printf("Keeping WebSocket stream info active")
+			streamInfo.LastActivity = time.Now()
+		}
 	}
 
 	return c.continueRequestBody()
@@ -704,7 +752,7 @@ func main() {
 	}
 
 	log.SetOutput(os.Stdout)
-	log.Printf("=== Starting Coraza ext_proc server 8/5 9:47PM (FIXED) ===")
+	log.Printf("=== Starting Coraza ext_proc server 8/6 9:00AM ===")
 	log.Printf("Port: %s", port)
 	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))
 

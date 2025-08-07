@@ -204,6 +204,7 @@ func (c *CorazaExtProc) cleanupRoutine() {
 			if shouldCleanup {
 				log.Printf("Cleaning up stream %s: %s", streamID, reason)
 				if streamInfo.Transaction != nil {
+					streamInfo.Transaction.ProcessLogging()
 					streamInfo.Transaction.Close()
 				}
 				delete(c.streamData, streamID)
@@ -333,6 +334,7 @@ func (c *CorazaExtProc) removeStreamInfo(streamID string) {
 	defer c.txMutex.Unlock()
 	if info, exists := c.streamData[streamID]; exists {
 		if info.Transaction != nil {
+			info.Transaction.ProcessLogging()
 			info.Transaction.Close()
 		}
 		delete(c.streamData, streamID)
@@ -481,7 +483,6 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		IsWebSocket:  isWebSocket,
 		LastActivity: time.Now(),
 	}
-	defer tx.ProcessLogging();
 	c.setStreamInfo(streamID, streamInfo)
 
 
@@ -658,6 +659,7 @@ func (c *CorazaExtProc) Close() error {
 	c.txMutex.Lock()
 	for streamID, info := range c.streamData {
 		if info.Transaction != nil {
+			info.Transaction.ProcessLogging()
 			info.Transaction.Close()
 		}
 		delete(c.streamData, streamID)

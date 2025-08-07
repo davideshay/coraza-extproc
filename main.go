@@ -481,7 +481,9 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		IsWebSocket:  isWebSocket,
 		LastActivity: time.Now(),
 	}
+	defer tx.ProcessLogging();
 	c.setStreamInfo(streamID, streamInfo)
+
 
 	// Extract method, URI, protocol
 	var method, uri, protocol string

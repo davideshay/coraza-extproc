@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -79,7 +79,7 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 
 	// Load initial configurations
 	if err := processor.loadConfigFromDirectory(); err != nil {
-		log.Printf("Failed to load initial config: %v", err)
+		slog.Error("Failed to load initial config: %v", err)
 	}
 
 	// Start watching for file changes
@@ -100,7 +100,7 @@ func (c *CorazaExtProc) loadConfigFromDirectory() error {
 	// Walk through the conf directory
 	return filepath.WalkDir(c.confDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			log.Printf("Error accessing path %s: %v", path, err)
+			slog.Error("Error accessing path %s: %v", path, err)
 			return nil // Continue walking
 		}
 
@@ -120,7 +120,7 @@ func (c *CorazaExtProc) loadConfigFromDirectory() error {
 		// Read conf file
 		confContent, err := os.ReadFile(path)
 		if err != nil {
-			log.Printf("Failed to read config file %s: %v", path, err)
+			slog.Error("Failed to read config file %s: %v", path, err)
 			return nil
 		}
 
@@ -129,7 +129,7 @@ func (c *CorazaExtProc) loadConfigFromDirectory() error {
 			WithRootFS(os.DirFS(c.baseDir)).
 			WithDirectives(string(confContent)))
 		if err != nil {
-			log.Printf("Failed to create WAF for domain %s: %v", domain, err)
+			slog.Error("Failed to create WAF for domain %s: %v", domain, err)
 			return nil
 		}
 
@@ -137,7 +137,7 @@ func (c *CorazaExtProc) loadConfigFromDirectory() error {
 		c.wafEngines[domain] = waf
 		c.mutex.Unlock()
 
-		log.Printf("Loaded WAF rules for domain: %s from file: %s", domain, path)
+		slog.Info("Loaded WAF rules for domain: %s from file: %s", domain, path)
 		return nil
 	})
 }
@@ -161,7 +161,7 @@ func (c *CorazaExtProc) watchConfigDirectory() {
 			}
 			hash := sha256.Sum256(content)
 			if oldHash, exists := previousHashes[path]; !exists || oldHash != hash {
-				log.Printf("Detected config file change: %s", path)
+				slog.Info("Detected config file change: %s", path)
 				previousHashes[path] = hash
 				changed = true
 			}
@@ -170,7 +170,7 @@ func (c *CorazaExtProc) watchConfigDirectory() {
 
 		if changed {
 			if err := c.loadConfigFromDirectory(); err != nil {
-				log.Printf("Failed to reload config: %v", err)
+				slog.Error("Failed to reload config: %v", err)
 			}
 		}
 	}
@@ -202,7 +202,7 @@ func (c *CorazaExtProc) cleanupRoutine() {
 			}
 			
 			if shouldCleanup {
-				log.Printf("Cleaning up stream %s: %s", streamID, reason)
+				slog.Debug("Cleaning up stream %s: %s", streamID, reason)
 				if streamInfo.Transaction != nil {
 					streamInfo.Transaction.ProcessLogging()
 					streamInfo.Transaction.Close()
@@ -219,12 +219,12 @@ func (c *CorazaExtProc) logAvailableEngines() {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
-	log.Printf("Available WAF engines:")
+	slog.Debug("Available WAF engines:")
 	for domain := range c.wafEngines {
-		log.Printf("  - %s", domain)
+		slog.Debug("  - %s", domain)
 	}
 	if len(c.wafEngines) == 0 {
-		log.Printf("  No WAF engines loaded!")
+		slog.Error("  No WAF engines loaded!")
 	}
 }
 
@@ -234,7 +234,7 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 
 	// Try exact match first
 	if waf, exists := c.wafEngines[authority]; exists {
-		log.Printf("Found exact match for: %s", authority)
+		slog.Debug("Found exact match for: %s", authority)
 		return waf
 	}
 
@@ -243,7 +243,7 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 		if strings.HasPrefix(domain, "*.") {
 			wildcard := strings.TrimPrefix(domain, "*.")
 			if strings.HasSuffix(authority, wildcard) {
-				log.Printf("Found wildcard match: %s matches %s", authority, domain)
+				slog.Debug("Found wildcard match: %s matches %s", authority, domain)
 				return waf
 			}
 		}
@@ -251,11 +251,11 @@ func (c *CorazaExtProc) getWAFEngine(authority string) coraza.WAF {
 
 	// Return default WAF if exists
 	if waf, exists := c.wafEngines["default"]; exists {
-		log.Printf("Using default WAF engine for: %s", authority)
+		slog.Debug("Using default WAF engine for: %s", authority)
 		return waf
 	}
 
-	log.Printf("No WAF engine found for: %s", authority)
+	slog.Error("No WAF engine found for: %s", authority)
 	return nil
 }
 
@@ -271,7 +271,7 @@ func (c *CorazaExtProc) getStreamIDFromRequest(req *envoy_service_ext_proc_v3.Pr
 							headerKey := strings.ToLower(header.Key)
 							headerValue := string(header.RawValue)
 							if headerKey == "x-request-id" || headerKey == "x-trace-id" {
-								log.Printf("Found potential request ID in headers: %s = %s", header.Key, headerValue)
+								slog.Debug("Found potential request ID in headers: %s = %s", header.Key, headerValue)
 								return headerValue
 							}
 						}
@@ -294,7 +294,7 @@ func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalPro
 
 	// Method 2: Use context pointer as consistent identifier
 	streamPtr := fmt.Sprintf("%p", ctx)
-	log.Printf("Using context pointer as stream ID: %s", streamPtr)
+	slog.Info("Using context pointer as stream ID: %s", streamPtr)
 	return streamPtr
 }
 
@@ -326,7 +326,7 @@ func (c *CorazaExtProc) setStreamInfo(streamID string, info *StreamInfo) {
 	info.LastActivity = time.Now()
 	c.streamData[streamID] = info
 	c.transactions[streamID] = info.Transaction
-	log.Printf("Stored stream info for ID: %s (WebSocket: %t), total streams: %d", streamID, info.IsWebSocket, len(c.streamData))
+	slog.Debug("Stored stream info for ID: %s (WebSocket: %t), total streams: %d", streamID, info.IsWebSocket, len(c.streamData))
 }
 
 func (c *CorazaExtProc) removeStreamInfo(streamID string) {
@@ -339,27 +339,27 @@ func (c *CorazaExtProc) removeStreamInfo(streamID string) {
 		}
 		delete(c.streamData, streamID)
 		delete(c.transactions, streamID)
-		log.Printf("Removed stream info for ID: %s, remaining streams: %d", streamID, len(c.streamData))
+		slog.Debug("Removed stream info for ID: %s, remaining streams: %d", streamID, len(c.streamData))
 	}
 }
 
 func (c *CorazaExtProc) logAllStreams() {
 	c.txMutex.RLock()
 	defer c.txMutex.RUnlock()
-	log.Printf("=== Active Streams Debug ===")
+	slog.Debug("=== Active Streams Debug ===")
 	if len(c.streamData) == 0 {
-		log.Printf("No active streams")
+		slog.Debug("No active streams")
 		return
 	}
 	for streamID, info := range c.streamData {
-		log.Printf("Stream %s: Authority=%s, HasTransaction=%t, Age=%v",
+		slog.Debug("Stream %s: Authority=%s, HasTransaction=%t, Age=%v",
 			streamID, info.Authority, info.Transaction != nil, time.Since(info.CreatedAt))
 	}
-	log.Printf("=== End Active Streams ===")
+	slog.Debug("=== End Active Streams ===")
 }
 
 func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer) error {
-	log.Printf("=== New gRPC stream connection ===")
+	slog.Debug("=== New gRPC stream connection ===")
 
 	// We'll determine the stream ID from the first request
 	var streamID string
@@ -367,7 +367,7 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 	// Ensure cleanup happens when stream ends
 	defer func() {
 		if streamID != "" {
-			log.Printf("Stream %s ending - cleaning up", streamID)
+			slog.Debug("Stream %s ending - cleaning up", streamID)
 			c.removeStreamInfo(streamID)
 		}
 	}()
@@ -376,9 +376,9 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 		req, err := stream.Recv()
 		if err != nil {
 			if streamID != "" {
-				log.Printf("Error receiving from stream %s: %v", streamID, err)
+				slog.Error("Error receiving from stream %s: %v", streamID, err)
 			} else {
-				log.Printf("Error receiving from stream: %v", err)
+				slog.Error("Error receiving from stream: %v", err)
 			}
 			return err
 		}
@@ -386,26 +386,26 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 		// Get stream ID from the first request if we don't have it yet
 		if streamID == "" {
 			streamID = c.getStreamID(stream, req)
-			log.Printf("Stream ID: %s", streamID)
+			slog.Debug("Stream ID: %s", streamID)
 		}
 
-		log.Printf("Received request type for stream %s: %T", streamID, req.Request)
+		slog.Debug("Received request type for stream %s: %T", streamID, req.Request)
 
 		var resp *envoy_service_ext_proc_v3.ProcessingResponse
 
 		switch r := req.Request.(type) {
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestHeaders:
-			log.Printf("Processing RequestHeaders for stream %s", streamID)
+			slog.Debug("Processing RequestHeaders for stream %s", streamID)
 			resp = c.processRequestHeaders(r.RequestHeaders, streamID)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_RequestBody:
-			log.Printf("Processing RequestBody for stream %s", streamID)
+			slog.Debug("Processing RequestBody for stream %s", streamID)
 			c.logAllStreams() // Debug active streams
 			resp = c.processRequestBody(r.RequestBody, streamID)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_ResponseHeaders:
-			log.Printf("Processing ResponseHeaders for stream %s", streamID)
+			slog.Debug("Processing ResponseHeaders for stream %s", streamID)
 			resp = c.processResponseHeaders(r.ResponseHeaders, streamID)
 		default:
-			log.Printf("Unknown request type for stream %s, sending continue response", streamID)
+			slog.Error("Unknown request type for stream %s, sending continue response", streamID)
 			resp = &envoy_service_ext_proc_v3.ProcessingResponse{
 				Response: &envoy_service_ext_proc_v3.ProcessingResponse_ImmediateResponse{
 					ImmediateResponse: &envoy_service_ext_proc_v3.ImmediateResponse{
@@ -415,20 +415,20 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 			}
 		}
 
-		log.Printf("Sending response type for stream %s: %T", streamID, resp.Response)
+		slog.Debug("Sending response type for stream %s: %T", streamID, resp.Response)
 		if err := stream.Send(resp); err != nil {
-			log.Printf("Error sending response for stream %s: %v", streamID, err)
+			slog.Error("Error sending response for stream %s: %v", streamID, err)
 			return err
 		}
-		log.Printf("Response sent successfully for stream %s", streamID)
+		slog.Debug("Response sent successfully for stream %s", streamID)
 	}
 }
 
 func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
-	log.Printf("=== Processing Request Headers for stream: %s ===", streamID)
+	slog.Debug("=== Processing Request Headers for stream: %s ===", streamID)
 
 	if headers == nil || headers.Headers == nil {
-		log.Printf("ERROR: headers structure is nil")
+		slog.Error("ERROR: headers structure is nil")
 		return c.continueRequest()
 	}
 
@@ -457,18 +457,18 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	// Detect WebSocket upgrade request
 	if strings.Contains(connection, "upgrade") && upgrade == "websocket" {
 		isWebSocket = true
-		log.Printf("Detected WebSocket upgrade request for authority: %s", authority)
+		slog.Info("Detected WebSocket upgrade request for authority: %s", authority)
 	}
 
 	if authority == "" {
-		log.Printf("No authority found in headers - continuing request")
+		slog.Error("No authority found in headers - continuing request")
 		return c.continueRequest()
 	}
 
 	// Get WAF engine for this domain
 	waf := c.getWAFEngine(authority)
 	if waf == nil {
-		log.Printf("No WAF engine found for authority: %s - continuing request", authority)
+		slog.Error("No WAF engine found for authority: %s - continuing request", authority)
 		c.logAvailableEngines()
 		return c.continueRequest()
 	}
@@ -504,7 +504,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	}
 
 	if method == "" || uri == "" || protocol == "" {
-		log.Printf("Missing required pseudo-headers: method=%s uri=%s protocol=%s", method, uri, protocol)
+		slog.Error("Missing required pseudo-headers: method=%s uri=%s protocol=%s", method, uri, protocol)
 		return c.continueRequest()
 	}
 
@@ -521,18 +521,18 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 
 	// Check if request should be blocked
 	if it := tx.ProcessRequestHeaders(); it != nil {
-		log.Printf("WAF BLOCKED REQUEST - Action: %s, RuleID: %d", it.Action, it.RuleID)
+		slog.Error("WAF BLOCKED REQUEST - Action: %s, RuleID: %d", it.Action, it.RuleID)
 		c.removeStreamInfo(streamID)
 		return c.createBlockResponse(it)
 	}
 
-	log.Printf("WAF allowed request headers for %s (WebSocket: %t)", authority, isWebSocket)
+	slog.Debug("WAF allowed request headers for %s (WebSocket: %t)", authority, isWebSocket)
 	return c.continueRequest()
 }
 
 // Update activity timestamp when processing body
 func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
-	log.Printf("=== Processing Request Body for stream: %s ===", streamID)
+	slog.Debug("=== Processing Request Body for stream: %s ===", streamID)
 
 	// Update activity timestamp
 	if streamInfo := c.getStreamInfo(streamID); streamInfo != nil {
@@ -540,38 +540,38 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 	}
 
 	if body == nil {
-		log.Printf("ERROR: body is nil")
+		slog.Error("ERROR: body is nil")
 		return c.continueRequestBody()
 	}
 
 	streamInfo := c.getStreamInfo(streamID)
 	if streamInfo == nil {
-		log.Printf("ERROR: No stream info found for stream %s", streamID)
+		slog.Error("ERROR: No stream info found for stream %s", streamID)
 		return c.continueRequestBody()
 	}
 
 	if streamInfo.Transaction == nil {
-		log.Printf("ERROR: Stream info exists but transaction is nil for stream %s", streamID)
+		slog.Error("ERROR: Stream info exists but transaction is nil for stream %s", streamID)
 		return c.continueRequestBody()
 	}
 
 	tx := streamInfo.Transaction
-	log.Printf("Processing body chunk of size: %d bytes (WebSocket: %t)", len(body.Body), streamInfo.IsWebSocket)
+	slog.Debug("Processing body chunk of size: %d bytes (WebSocket: %t)", len(body.Body), streamInfo.IsWebSocket)
 
 	if len(body.Body) > 0 {
 		if _, _, err := tx.WriteRequestBody(body.Body); err != nil {
-			log.Printf("Failed to write request body: %v", err)
+			slog.Error("Failed to write request body: %v", err)
 			c.removeStreamInfo(streamID)
 			return c.continueRequestBody()
 		}
 	}
 
 	if body.EndOfStream {
-		log.Printf("End of stream reached for stream %s", streamID)
+		slog.Debug("End of stream reached for stream %s", streamID)
 		if it, err := tx.ProcessRequestBody(); err != nil {
-			log.Printf("Failed to process request body: %v", err)
+			slog.Error("Failed to process request body: %v", err)
 		} else if it != nil {
-			log.Printf("WAF BLOCKED REQUEST BODY - Action: %s, RuleID: %d", it.Action, it.RuleID)
+			slog.Error("WAF BLOCKED REQUEST BODY - Action: %s, RuleID: %d", it.Action, it.RuleID)
 			c.removeStreamInfo(streamID)
 			return c.createBlockResponse(it)
 		}
@@ -579,10 +579,10 @@ func (c *CorazaExtProc) processRequestBody(body *envoy_service_ext_proc_v3.HttpB
 		// For WebSocket connections, don't remove stream info immediately
 		// as the connection might stay open for data exchange
 		if !streamInfo.IsWebSocket {
-			log.Printf("Removing stream info for completed HTTP request")
+			slog.Debug("Removing stream info for completed HTTP request")
 			c.removeStreamInfo(streamID)
 		} else {
-			log.Printf("Keeping WebSocket stream info active")
+			slog.Debug("Keeping WebSocket stream info active")
 			streamInfo.LastActivity = time.Now()
 		}
 	}
@@ -630,7 +630,7 @@ func (c *CorazaExtProc) continueRequestBody() *envoy_service_ext_proc_v3.Process
 }
 
 func (c *CorazaExtProc) createBlockResponse(it *types.Interruption) *envoy_service_ext_proc_v3.ProcessingResponse {
-	log.Printf("*** REQUEST BLOCKED *** Action: %s, RuleID: %d, Data: %+v", it.Action, it.RuleID, it.Data)
+	slog.Error("*** REQUEST BLOCKED *** Action: %s, RuleID: %d, Data: %+v", it.Action, it.RuleID, it.Data)
 
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ImmediateResponse{
@@ -673,39 +673,61 @@ func (c *CorazaExtProc) Close() error {
 	return nil
 }
 
+func getLogLevelFromEnv(envVar string) slog.Leveler {
+	levelStr := strings.ToLower(os.Getenv(envVar))
+	switch levelStr {
+	case "debug","d","1":
+		return slog.LevelDebug
+	case "info","information","i","2":
+		return slog.LevelInfo
+	case "warn", "warning","w","3":
+		return slog.LevelWarn
+	case "error","err","e","4":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo // default level
+	}
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "9000"
 	}
 
-	log.SetOutput(os.Stdout)
-	log.Printf("=== Starting Coraza ext_proc server 8/6 1:00PM ===")
-	log.Printf("Port: %s", port)
-	log.Printf("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))
+	level := getLogLevelFromEnv("LOG_LEVEL")
+	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: level,
+	})
+	slog.SetDefault(slog.New(handler))
+
+
+	slog.Info("=== Starting Coraza ext_proc server 8/6 1:00PM ===")
+	slog.Info("Port: %s", port)
+	slog.Info("Go version: %s", strings.TrimPrefix(runtime.Version(), "go"))
 
 	lis, err := net.Listen("tcp", ":"+port)
 	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
+		slog.Error("Failed to listen: %v", err)
 	}
-	log.Printf("TCP listener created successfully on :%s", port)
+	slog.Info("TCP listener created successfully on :%s", port)
 
 	processor, err := NewCorazaExtProc()
 	if err != nil {
-		log.Fatalf("Failed to create processor: %v", err)
+		slog.Error("Failed to create processor: %v", err)
 	}
 	defer processor.Close()
-	log.Printf("Coraza processor created successfully")
+	slog.Info("Coraza processor created successfully")
 
 	s := grpc.NewServer()
 	envoy_service_ext_proc_v3.RegisterExternalProcessorServer(s, processor)
-	log.Printf("gRPC server created and ext_proc service registered")
+	slog.Info("gRPC server created and ext_proc service registered")
 
-	log.Printf("Watching config directory: %s", processor.confDir)
+	slog.Info("Watching config directory: %s", processor.confDir)
 	processor.logAvailableEngines()
 
-	log.Printf("=== Server ready - waiting for connections ===")
+	slog.Info("=== Server ready - waiting for connections ===")
 	if err := s.Serve(lis); err != nil {
-		log.Fatalf("Failed to serve: %v", err)
+		slog.Error("Failed to serve: %v", err)
 	}
 }

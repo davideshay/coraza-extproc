@@ -152,7 +152,13 @@ func (c *CorazaExtProc) watchConfigDirectory() {
 
 		filepath.WalkDir(c.confDir, func(path string, d fs.DirEntry, err error) error {
 			slog.Debug("Checking config entry", slog.String("path", path), slog.Bool("isdir", d.IsDir()), slog.String("name", d.Name()), slog.Any("d", d))
-			if err != nil || d.IsDir() || strings.HasPrefix(d.Name(), ".") || !strings.HasSuffix(path, ".conf") {
+
+			if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != c.confDir {
+				slog.Debug("skipping directory with prefix of .")
+				return filepath.SkipDir
+			}
+
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".conf") {
 				return nil
 			}
 			content, err := os.ReadFile(path)

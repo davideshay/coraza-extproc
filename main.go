@@ -151,6 +151,7 @@ func (c *CorazaExtProc) watchConfigDirectory() {
 		changed := false
 
 		filepath.WalkDir(c.confDir, func(path string, d fs.DirEntry, err error) error {
+			slog.Debug("Checking config entry", slog.String("path", path), slog.Bool("isdir", d.IsDir()), slog.String("name", d.Name()), slog.Any("d", d))
 			if err != nil || d.IsDir() || strings.HasPrefix(d.Name(), ".") || !strings.HasSuffix(path, ".conf") {
 				return nil
 			}

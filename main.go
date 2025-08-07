@@ -151,10 +151,7 @@ func (c *CorazaExtProc) watchConfigDirectory() {
 		changed := false
 
 		filepath.WalkDir(c.confDir, func(path string, d fs.DirEntry, err error) error {
-			slog.Debug("Checking config entry", slog.String("path", path), slog.Bool("isdir", d.IsDir()), slog.String("name", d.Name()), slog.Any("d", d))
-
 			if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != c.confDir {
-				slog.Debug("skipping directory with prefix of .")
 				return filepath.SkipDir
 			}
 
@@ -694,7 +691,7 @@ func main() {
 	})
 	slog.SetDefault(slog.New(handler))
 
-	slog.Info("=== Starting Coraza ext_proc server 8/6 1:00PM ===")
+	slog.Info("=== Starting Coraza ext_proc server 8/7 3:15PM ===")
 	slog.Info("Port", slog.String("port", port))
 	slog.Info("Go version", slog.String("version", strings.TrimPrefix(runtime.Version(), "go")))
 

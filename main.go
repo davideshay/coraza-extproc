@@ -359,7 +359,7 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 
 	for {
 		req, err := stream.Recv()
-		if err != nil {
+		if err != nil && err.Error() != "EOF" {
 			if streamID != "" {
 				slog.Error("Error receiving from stream", slog.String("streamID", streamID), slog.Any("error", err))
 			} else {
@@ -614,7 +614,7 @@ func (c *CorazaExtProc) continueRequestBody() *envoy_service_ext_proc_v3.Process
 }
 
 func (c *CorazaExtProc) createBlockResponse(it *types.Interruption) *envoy_service_ext_proc_v3.ProcessingResponse {
-	slog.Error("*** REQUEST BLOCKED *** Action: %s, RuleID: %d, Data: %+v", it.Action, it.RuleID, it.Data)
+	slog.Error("*** REQUEST BLOCKED ***", slog.String("action", it.Action), slog.Int("ruleID", it.RuleID), slog.Any("data", it.Data))
 
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ImmediateResponse{

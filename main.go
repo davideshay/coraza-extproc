@@ -374,7 +374,7 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 			slog.Debug("Stream ID:", slog.String("streamID", streamID))
 		}
 
-		slog.Debug("Received request type for stream", slog.String("streamID", streamID), slog.Any("request", req.Request))
+		//		slog.Debug("Received request type for stream", slog.String("streamID", streamID), slog.Any("request", req.Request))
 
 		var resp *envoy_service_ext_proc_v3.ProcessingResponse
 

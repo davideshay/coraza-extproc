@@ -48,16 +48,13 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 	if baseDir == "" {
 		baseDir = "/etc/coraza/"
 	}
-
 	if !strings.HasSuffix(baseDir, "/") {
 		baseDir = baseDir + "/"
 	}
-
 	confDir := os.Getenv("CONF_DIR")
 	if confDir == "" {
 		confDir = baseDir + "conf"
 	}
-
 	if !strings.HasSuffix(confDir, "/") {
 		confDir = confDir + "/"
 	}
@@ -427,6 +424,7 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 	var authority string
 	var isWebSocket bool
 	var connection, upgrade string
+	var method, uri, protocol string
 
 	for _, header := range headers.Headers.Headers {
 		if header == nil {
@@ -434,7 +432,6 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		}
 		headerKeyLower := strings.ToLower(header.Key)
 		headerValue := strings.ToLower(string(header.RawValue))
-
 		switch headerKeyLower {
 		case ":authority", "host":
 			authority = string(header.RawValue)
@@ -442,6 +439,12 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 			connection = headerValue
 		case "upgrade":
 			upgrade = headerValue
+		case ":method":
+			method = string(header.RawValue)
+		case ":path":
+			uri = string(header.RawValue)
+		case ":scheme":
+			protocol = string(header.RawValue)
 		}
 	}
 
@@ -475,23 +478,6 @@ func (c *CorazaExtProc) processRequestHeaders(headers *envoy_service_ext_proc_v3
 		LastActivity: time.Now(),
 	}
 	c.setStreamInfo(streamID, streamInfo)
-
-	// Extract method, URI, protocol
-	var method, uri, protocol string
-	for _, header := range headers.Headers.Headers {
-		if header == nil {
-			continue
-		}
-		headerKeyLower := strings.ToLower(header.Key)
-		switch headerKeyLower {
-		case ":method":
-			method = string(header.RawValue)
-		case ":path":
-			uri = string(header.RawValue)
-		case ":scheme":
-			protocol = string(header.RawValue)
-		}
-	}
 
 	if method == "" || uri == "" || protocol == "" {
 		slog.Error("Missing required pseudo-headers", slog.String("method", method), slog.String("uri", uri), slog.String("protocol", protocol))

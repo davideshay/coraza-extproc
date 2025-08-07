@@ -359,11 +359,13 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 
 	for {
 		req, err := stream.Recv()
-		if err != nil && err.Error() != "EOF" {
-			if streamID != "" {
-				slog.Error("Error receiving from stream", slog.String("streamID", streamID), slog.Any("error", err))
-			} else {
-				slog.Error("Error receiving from stream:", slog.Any("error", err))
+		if err != nil {
+			if err.Error() != "EOF" {
+				if streamID != "" {
+					slog.Error("Error receiving from stream", slog.String("streamID", streamID), slog.Any("error", err))
+				} else {
+					slog.Error("Error receiving from stream:", slog.Any("error", err))
+				}
 			}
 			return err
 		}
@@ -374,7 +376,7 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 			slog.Debug("Stream ID:", slog.String("streamID", streamID))
 		}
 
-		//		slog.Debug("Received request type for stream", slog.String("streamID", streamID), slog.Any("request", req.Request))
+		slog.Debug("Received request type for stream", slog.String("streamID", streamID), slog.Any("request", req.Request))
 
 		var resp *envoy_service_ext_proc_v3.ProcessingResponse
 

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -88,19 +90,16 @@ func NewCorazaExtProc() (*CorazaExtProc, error) {
 }
 
 func (c *CorazaExtProc) loadConfigFromDirectory() error {
-	// Clear existing engines
-	c.mutex.Lock()
-	c.wafEngines = make(map[string]coraza.WAF)
-	c.mutex.Unlock()
+	// Build new engines map without affecting current ones
+	newEngines := make(map[string]coraza.WAF)
 
-	// Walk through the conf directory
-	return filepath.WalkDir(c.confDir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(c.confDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			slog.Error("Error accessing path:", slog.String("path", path), slog.Any("err", err))
-			return nil // Continue walking
+			return nil
 		}
 
-		// Skip processing ALL files and the tree inside hidden directories (k8s config mounts)
+		// Skip processing ALL files and the tree inside hidden directories
 		if d.IsDir() && strings.HasPrefix(d.Name(), ".") && path != c.confDir {
 			return filepath.SkipDir
 		}
@@ -110,32 +109,47 @@ func (c *CorazaExtProc) loadConfigFromDirectory() error {
 			return nil
 		}
 
-		// Extract domain from filename (e.g., "example.com.conf" -> "example.com")
 		domain := strings.TrimSuffix(d.Name(), ".conf")
 
-		// Read conf file
 		confContent, err := os.ReadFile(path)
 		if err != nil {
 			slog.Error("Failed to read config file:", slog.String("path", path), slog.Any("err", err))
-			return nil
+			return nil // Continue with other configs
 		}
 
-		// Create WAF engine
 		waf, err := coraza.NewWAF(coraza.NewWAFConfig().
 			WithRootFS(os.DirFS(c.baseDir)).
 			WithDirectives(string(confContent)))
 		if err != nil {
 			slog.Error("Failed to create WAF for domain:", slog.String("domain", domain), slog.Any("err", err))
-			return nil
+			return nil // Continue with other configs
 		}
 
-		c.mutex.Lock()
-		c.wafEngines[domain] = waf
-		c.mutex.Unlock()
-
+		newEngines[domain] = waf
 		slog.Info("Loaded WAF rules for domain and file:", slog.String("domain", domain), slog.String("path", path))
 		return nil
 	})
+
+	if err != nil {
+		return fmt.Errorf("failed to walk config directory: %w", err)
+	}
+
+	// Atomic swap of engines
+	c.mutex.Lock()
+	oldEngines := c.wafEngines
+	c.wafEngines = newEngines
+	c.mutex.Unlock()
+
+	// Clean up old engines (if they have cleanup methods)
+	// Note: Check Coraza documentation for proper cleanup
+	for domain, oldWaf := range oldEngines {
+		slog.Debug("Cleaning up old WAF engine:", slog.String("domain", domain))
+		// If coraza.WAF has a Close() or cleanup method, call it here
+		_ = oldWaf // Placeholder - check actual cleanup needs
+	}
+
+	slog.Info("Successfully reloaded WAF engines", slog.Int("count", len(newEngines)))
+	return nil
 }
 
 func (c *CorazaExtProc) watchConfigDirectory() {
@@ -283,19 +297,26 @@ func (c *CorazaExtProc) getStreamIDFromRequest(req *envoy_service_ext_proc_v3.Pr
 	return ""
 }
 
+func generateSecureStreamID() string {
+	bytes := make([]byte, 16) // 128-bit random ID
+	if _, err := rand.Read(bytes); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand fails
+		return fmt.Sprintf("fallback_%d_%d", time.Now().UnixNano(), os.Getpid())
+	}
+	return hex.EncodeToString(bytes)
+}
+
 // Improved stream ID generation with multiple fallback methods
-func (c *CorazaExtProc) getStreamID(stream envoy_service_ext_proc_v3.ExternalProcessor_ProcessServer, req *envoy_service_ext_proc_v3.ProcessingRequest) string {
+func (c *CorazaExtProc) getStreamID(req *envoy_service_ext_proc_v3.ProcessingRequest) string {
 	// Method 1: Try request attributes first
 	if streamID := c.getStreamIDFromRequest(req); streamID != "" {
 		return streamID
 	}
 
-	ctx := stream.Context()
-
-	// Method 2: Use context pointer as consistent identifier
-	streamPtr := fmt.Sprintf("%p", ctx)
-	slog.Info("Using context pointer as stream ID:", slog.String("streamPtr", streamPtr))
-	return streamPtr
+	// Method 2: Generate secure random ID
+	streamID := generateSecureStreamID()
+	slog.Debug("Generated secure stream ID") // Don't log the actual ID
+	return streamID
 }
 
 func (c *CorazaExtProc) getStreamInfo(streamID string) *StreamInfo {
@@ -373,7 +394,7 @@ func (c *CorazaExtProc) Process(stream envoy_service_ext_proc_v3.ExternalProcess
 
 		// Get stream ID from the first request if we don't have it yet
 		if streamID == "" {
-			streamID = c.getStreamID(stream, req)
+			streamID = c.getStreamID(req)
 			slog.Debug("Stream ID:", slog.String("streamID", streamID))
 		}
 

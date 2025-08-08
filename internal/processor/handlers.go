@@ -108,14 +108,9 @@ func (p *Processor) processRequestHeaders(headers *envoy_service_ext_proc_v3.Htt
 
 	// Check for WAF blocks
 	if interruption := tx.ProcessRequestHeaders(); interruption != nil {
-		slog.Warn("WAF blocked request at headers phase",
-			slog.String("authority", authority),
-			slog.String("uri", uri), slog.String("method", method),
-			slog.String("action", interruption.Action),
-			slog.Int("ruleID", interruption.RuleID))
-
+		savedStreamInfo := *streamInfo
 		p.removeStreamInfo(streamID)
-		return p.createBlockResponse(streamInfo, interruption)
+		return p.createBlockResponse(savedStreamInfo, interruption)
 	}
 
 	slog.Debug("Request headers allowed",
@@ -174,9 +169,9 @@ func (p *Processor) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody,
 				slog.String("uri", streamInfo.URI),
 				slog.String("action", interruption.Action),
 				slog.Int("ruleID", interruption.RuleID))
-
+			savedStreamInfo := *streamInfo
 			p.removeStreamInfo(streamID)
-			return p.createBlockResponse(streamInfo, interruption)
+			return p.createBlockResponse(savedStreamInfo, interruption)
 		}
 
 		// For regular HTTP requests, clean up immediately
@@ -238,7 +233,7 @@ func (p *Processor) continueRequestBody() *envoy_service_ext_proc_v3.ProcessingR
 }
 
 // createBlockResponse creates a block response for WAF violations
-func (p *Processor) createBlockResponse(streamInfo *types.StreamInfo, interruption *coraza_types.Interruption) *envoy_service_ext_proc_v3.ProcessingResponse {
+func (p *Processor) createBlockResponse(streamInfo types.StreamInfo, interruption *coraza_types.Interruption) *envoy_service_ext_proc_v3.ProcessingResponse {
 	logging.LogSecurityEvent("WAF REQUEST BLOCKED", streamInfo, interruption)
 
 	return &envoy_service_ext_proc_v3.ProcessingResponse{

@@ -47,7 +47,7 @@ func getLogLevelFromEnv(envVar string) slog.Leveler {
 }
 
 // Security logs sensitive operations
-func LogSecurityEvent(msg string, streamInfo *types.StreamInfo, interruption *coraza_types.Interruption) {
+func LogSecurityEvent(msg string, streamInfo types.StreamInfo, interruption *coraza_types.Interruption) {
 	slog.Warn("WAF Event", slog.String("msg", msg), slog.String("authority", streamInfo.Authority),
 		slog.String("uri", streamInfo.URI), slog.String("action", interruption.Action),
 		slog.Int("ruleID", interruption.RuleID))

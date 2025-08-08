@@ -87,6 +87,7 @@ func (p *Processor) processRequestHeaders(headers *envoy_service_ext_proc_v3.Htt
 	streamInfo := &types.StreamInfo{
 		StreamID:     streamID,
 		Authority:    authority,
+		URI:          uri,
 		Transaction:  tx,
 		CreatedAt:    time.Now(),
 		IsWebSocket:  isWebSocket,
@@ -108,6 +109,7 @@ func (p *Processor) processRequestHeaders(headers *envoy_service_ext_proc_v3.Htt
 	if interruption := tx.ProcessRequestHeaders(); interruption != nil {
 		slog.Warn("WAF blocked request at headers phase",
 			slog.String("authority", authority),
+			slog.String("uri", uri), slog.String("method", method),
 			slog.String("action", interruption.Action),
 			slog.Int("ruleID", interruption.RuleID))
 
@@ -167,6 +169,8 @@ func (p *Processor) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody,
 			slog.Error("Failed to process request body", slog.Any("error", err))
 		} else if interruption != nil {
 			slog.Warn("WAF blocked request at body phase",
+				slog.String("authority", streamInfo.Authority),
+				slog.String("uri", streamInfo.URI),
 				slog.String("action", interruption.Action),
 				slog.Int("ruleID", interruption.RuleID))
 

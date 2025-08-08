@@ -10,6 +10,7 @@ import (
 type StreamInfo struct {
 	StreamID     string
 	Authority    string
+	URI          string
 	Transaction  types.Transaction
 	CreatedAt    time.Time
 	IsWebSocket  bool

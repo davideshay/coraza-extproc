@@ -1,11 +1,13 @@
 package logging
 
 import (
-	"context"
+	"coraza-extproc/internal/types"
 	"log/slog"
 	"os"
 	"runtime"
 	"strings"
+
+	coraza_types "github.com/corazawaf/coraza/v3/types"
 )
 
 // Setup configures and returns a structured logger
@@ -45,20 +47,9 @@ func getLogLevelFromEnv(envVar string) slog.Leveler {
 }
 
 // Security logs sensitive operations
-func LogSecurityEvent(event string, fields ...slog.Attr) {
-	attrs := append([]slog.Attr{
-		slog.String("event_type", "security"),
-		slog.String("event", event),
-	}, fields...)
+func LogSecurityEvent(msg string, streamInfo *types.StreamInfo, interruption *coraza_types.Interruption) {
+	slog.Warn("WAF Event", slog.String("msg", msg), slog.String("authority", streamInfo.Authority),
+		slog.String("uri", streamInfo.URI), slog.String("action", interruption.Action),
+		slog.Int("ruleID", interruption.RuleID))
 
-	slog.LogAttrs(context.Background(), slog.LevelWarn, "Security Event", attrs...)
-}
-
-// LogWAFAction logs WAF actions for monitoring
-func LogWAFAction(action, authority string, ruleID int, blocked bool) {
-	slog.Info("WAF Action",
-		slog.String("action", action),
-		slog.String("authority", authority),
-		slog.Int("rule_id", ruleID),
-		slog.Bool("blocked", blocked))
 }

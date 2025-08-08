@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"coraza-extproc/internal/logging"
 	"coraza-extproc/internal/types"
 
 	coraza_types "github.com/corazawaf/coraza/v3/types"
@@ -114,7 +115,7 @@ func (p *Processor) processRequestHeaders(headers *envoy_service_ext_proc_v3.Htt
 			slog.Int("ruleID", interruption.RuleID))
 
 		p.removeStreamInfo(streamID)
-		return p.createBlockResponse(interruption)
+		return p.createBlockResponse(streamInfo, interruption)
 	}
 
 	slog.Debug("Request headers allowed",
@@ -175,7 +176,7 @@ func (p *Processor) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody,
 				slog.Int("ruleID", interruption.RuleID))
 
 			p.removeStreamInfo(streamID)
-			return p.createBlockResponse(interruption)
+			return p.createBlockResponse(streamInfo, interruption)
 		}
 
 		// For regular HTTP requests, clean up immediately
@@ -237,11 +238,8 @@ func (p *Processor) continueRequestBody() *envoy_service_ext_proc_v3.ProcessingR
 }
 
 // createBlockResponse creates a block response for WAF violations
-func (p *Processor) createBlockResponse(interruption *coraza_types.Interruption) *envoy_service_ext_proc_v3.ProcessingResponse {
-	slog.Error("*** REQUEST BLOCKED ***",
-		slog.String("action", interruption.Action),
-		slog.Int("ruleID", interruption.RuleID),
-		slog.Any("data", interruption.Data))
+func (p *Processor) createBlockResponse(streamInfo *types.StreamInfo, interruption *coraza_types.Interruption) *envoy_service_ext_proc_v3.ProcessingResponse {
+	logging.LogSecurityEvent("WAF REQUEST BLOCKED", streamInfo, interruption)
 
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ImmediateResponse{

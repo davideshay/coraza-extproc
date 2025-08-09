@@ -31,7 +31,6 @@ func NewLoader(baseDir, confDir string, onChange func(map[string]coraza.WAF)) (*
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file watcher: %w", err)
 	}
-
 	loader := &Loader{
 		baseDir:     baseDir,
 		confDir:     confDir,
@@ -39,7 +38,6 @@ func NewLoader(baseDir, confDir string, onChange func(map[string]coraza.WAF)) (*
 		hashTracker: make(map[string][32]byte),
 		onChange:    onChange,
 	}
-
 	return loader, nil
 }
 
@@ -49,7 +47,6 @@ func (l *Loader) LoadInitial() error {
 	if err != nil {
 		return err
 	}
-
 	l.onChange(engines)
 	return nil
 }
@@ -72,31 +69,25 @@ func (l *Loader) loadFromDirectory() (map[string]coraza.WAF, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve config directory: %w", err)
 	}
-
 	engines := make(map[string]coraza.WAF)
-
 	err = filepath.WalkDir(absConfDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			slog.Error("Error accessing path", slog.String("path", path), slog.Any("err", err))
 			return nil
 		}
-
 		// Security checks
 		if !IsPathSafe(path, absConfDir) {
 			slog.Warn("Path outside config directory, skipping", slog.String("path", path))
 			return nil
 		}
-
 		// Skip hidden directories
 		if d.IsDir() && IsHiddenFile(d.Name()) && path != absConfDir {
 			return filepath.SkipDir
 		}
-
 		// Only process .conf files
 		if d.IsDir() || IsHiddenFile(d.Name()) || !IsConfigFile(d.Name()) {
 			return nil
 		}
-
 		// Validate domain name
 		domain := strings.TrimSuffix(d.Name(), ".conf")
 		if !IsValidDomainName(domain) {
@@ -105,28 +96,27 @@ func (l *Loader) loadFromDirectory() (map[string]coraza.WAF, error) {
 				slog.String("file", path))
 			return nil
 		}
-
 		// Check file size
 		fileInfo, err := d.Info()
 		if err != nil {
 			slog.Error("Failed to get file info", slog.String("path", path), slog.Any("err", err))
 			return nil
 		}
-
 		if fileInfo.Size() > types.MaxConfigFileSize {
 			slog.Error("Config file too large, skipping",
 				slog.String("path", path),
 				slog.Int64("size", fileInfo.Size()))
 			return nil
 		}
-
 		// Read and validate config
 		confContent, err := os.ReadFile(path)
 		if err != nil {
 			slog.Error("Failed to read config file", slog.String("path", path), slog.Any("err", err))
 			return nil
 		}
-
+		// Update hash tracker
+		hash := sha256.Sum256(confContent)
+		l.hashTracker[path] = hash
 		// Validate config before creating WAF
 		if err := ValidateCorazaConfig(string(confContent), l.baseDir); err != nil {
 			slog.Error("Invalid Coraza configuration, skipping",
@@ -135,7 +125,6 @@ func (l *Loader) loadFromDirectory() (map[string]coraza.WAF, error) {
 				slog.Any("err", err))
 			return nil
 		}
-
 		// Create WAF engine
 		waf, err := coraza.NewWAF(coraza.NewWAFConfig().
 			WithRootFS(os.DirFS(l.baseDir)).
@@ -146,16 +135,13 @@ func (l *Loader) loadFromDirectory() (map[string]coraza.WAF, error) {
 				slog.Any("err", err))
 			return nil
 		}
-
 		engines[domain] = waf
 		slog.Info("Loaded WAF rules", slog.String("domain", domain))
 		return nil
 	})
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to walk config directory: %w", err)
 	}
-
 	slog.Info("Configuration loaded", slog.Int("engines", len(engines)))
 	return engines, nil
 }
@@ -163,7 +149,6 @@ func (l *Loader) loadFromDirectory() (map[string]coraza.WAF, error) {
 func (l *Loader) watchLoop() {
 	ticker := time.NewTicker(types.ConfigWatchInterval)
 	defer ticker.Stop()
-
 	for range ticker.C {
 		l.checkForChanges()
 	}
@@ -171,30 +156,33 @@ func (l *Loader) watchLoop() {
 
 func (l *Loader) checkForChanges() {
 	changed := false
-
+	currentFiles := make(map[string]bool)
 	filepath.WalkDir(l.confDir, func(path string, d fs.DirEntry, err error) error {
 		if d.IsDir() && IsHiddenFile(d.Name()) && path != l.confDir {
 			return filepath.SkipDir
 		}
-
-		if err != nil || d.IsDir() || !IsConfigFile(path) {
+		if err != nil || d.IsDir() || !IsConfigFile(d.Name()) {
 			return nil
 		}
-
+		currentFiles[path] = true
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return nil
 		}
-
 		hash := sha256.Sum256(content)
 		if oldHash, exists := l.hashTracker[path]; !exists || oldHash != hash {
 			slog.Info("Config file changed", slog.String("path", path))
-			l.hashTracker[path] = hash
 			changed = true
 		}
 		return nil
 	})
-
+	// Check for deleted files
+	for trackedPath := range l.hashTracker {
+		if !currentFiles[trackedPath] {
+			slog.Info("Config file deleted", slog.String("path", trackedPath))
+			changed = true
+		}
+	}
 	if changed {
 		engines, err := l.loadFromDirectory()
 		if err != nil {

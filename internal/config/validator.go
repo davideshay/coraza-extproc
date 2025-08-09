@@ -24,8 +24,8 @@ func IsValidDomainName(domain string) bool {
 	}
 
 	// Allow wildcard domains like *.example.com
-	if strings.HasPrefix(domain, "*.") {
-		domain = strings.TrimPrefix(domain, "*.")
+	if after, ok := strings.CutPrefix(domain, "*."); ok {
+		domain = after
 	}
 
 	// Basic domain validation

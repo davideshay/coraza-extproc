@@ -137,6 +137,8 @@ func (p *Processor) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_P
 			resp = p.processRequestBody(r.RequestBody, streamID)
 		case *envoy_service_ext_proc_v3.ProcessingRequest_ResponseHeaders:
 			resp = p.processResponseHeaders(r.ResponseHeaders, streamID)
+		case *envoy_service_ext_proc_v3.ProcessingRequest_ResponseBody:
+			resp = p.processResponseBody(r.ResponseBody, streamID)
 		default:
 			slog.Warn("Unknown request type", slog.String("streamID", streamID))
 			resp = p.continueRequest()

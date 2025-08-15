@@ -1,12 +1,13 @@
 package processor
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
-	"coraza-extproc/internal/logging"
+	logging "coraza-extproc/internal/logging"
 	"coraza-extproc/internal/types"
 
 	coraza_types "github.com/corazawaf/coraza/v3/types"
@@ -191,13 +192,27 @@ func (p *Processor) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody,
 // processResponseHeaders handles response headers (cleanup phase)
 func (p *Processor) processResponseHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
 	slog.Debug("Processing response headers", slog.String("streamID", streamID))
-
+	slog.Log(context.Background(), logging.LevelTrace, "Response Headers", slog.String("headers", headers.String()))
 	// Clean up any remaining stream info
 	p.removeStreamInfo(streamID)
 
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ResponseHeaders{
 			ResponseHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
+				Response: &envoy_service_ext_proc_v3.CommonResponse{
+					Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
+				},
+			},
+		},
+	}
+}
+
+func (p *Processor) processResponseBody(body *envoy_service_ext_proc_v3.HttpBody, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
+	slog.Debug("Processing response body", slog.String("streamID", streamID))
+	slog.Log(context.Background(), logging.LevelTrace, "Body Contents", slog.String("body", body.String()))
+	return &envoy_service_ext_proc_v3.ProcessingResponse{
+		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ResponseBody{
+			ResponseBody: &envoy_service_ext_proc_v3.BodyResponse{
 				Response: &envoy_service_ext_proc_v3.CommonResponse{
 					Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
 				},

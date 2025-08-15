@@ -10,6 +10,8 @@ import (
 	coraza_types "github.com/corazawaf/coraza/v3/types"
 )
 
+const LevelTrace = slog.Level(-8)
+
 // Setup configures and returns a structured logger
 func Setup() *slog.Logger {
 	level := getLogLevelFromEnv("LOG_LEVEL")
@@ -33,6 +35,8 @@ func Setup() *slog.Logger {
 func getLogLevelFromEnv(envVar string) slog.Leveler {
 	levelStr := strings.ToLower(os.Getenv(envVar))
 	switch levelStr {
+	case "trace", "t", "0":
+		return LevelTrace
 	case "debug", "d", "1":
 		return slog.LevelDebug
 	case "info", "information", "i", "2":

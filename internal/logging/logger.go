@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"context"
 	"coraza-extproc/internal/types"
 	"log/slog"
 	"os"
@@ -27,6 +28,13 @@ func Setup() *slog.Logger {
 	logger.Info("Logger initialized",
 		slog.String("level", level.Level().String()),
 		slog.String("go_version", strings.TrimPrefix(runtime.Version(), "go")))
+
+	logger.Info("Sample messages logged for this level:")
+	logger.Error("Error message")
+	logger.Warn("Warning MEssage")
+	logger.Info("Info message")
+	logger.Debug("Debug message")
+	logger.Log(context.Background(), LevelTrace, "Trace Message")
 
 	return logger
 }

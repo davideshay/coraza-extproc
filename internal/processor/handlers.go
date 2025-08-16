@@ -56,6 +56,8 @@ func (p *Processor) processRequestHeaders(headers *envoy_service_ext_proc_v3.Htt
 		}
 	}
 
+	slog.Log(context.Background(), logging.LevelTrace, "Request:", slog.String("authority", authority), slog.String("uri", uri))
+
 	// Detect WebSocket upgrade
 	if strings.Contains(connection, "upgrade") && upgrade == "websocket" {
 		isWebSocket = true

@@ -269,6 +269,12 @@ func (p *Processor) createBlockResponse(streamInfo types.StreamInfo, interruptio
 								Value: "text/plain",
 							},
 						},
+						{
+							Header: &envoy_config_core_v3.HeaderValue{
+								Key:   "x-waf-violation",
+								Value: "1",
+							},
+						},
 					},
 				},
 			},

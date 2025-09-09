@@ -11,6 +11,7 @@ import (
 	"coraza-extproc/internal/types"
 
 	coraza_types "github.com/corazawaf/coraza/v3/types"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	envoy_config_core_v3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	envoy_service_ext_proc_v3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -268,12 +269,14 @@ func (p *Processor) createBlockResponse(streamInfo types.StreamInfo, interruptio
 								Key:   "content-type",
 								Value: "text/plain",
 							},
+							Append: &wrapperspb.BoolValue{Value: false},
 						},
 						{
 							Header: &envoy_config_core_v3.HeaderValue{
 								Key:   "x-waf-violation",
 								Value: "1",
 							},
+							Append: &wrapperspb.BoolValue{Value: false},
 						},
 					},
 				},

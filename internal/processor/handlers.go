@@ -266,15 +266,15 @@ func (p *Processor) createBlockResponse(streamInfo types.StreamInfo, interruptio
 					SetHeaders: []*envoy_config_core_v3.HeaderValueOption{
 						{
 							Header: &envoy_config_core_v3.HeaderValue{
-								Key:   "content-type",
-								Value: "text/plain",
+								Key:      "content-type",
+								RawValue: []byte("text/plain"),
 							},
 							Append: &wrapperspb.BoolValue{Value: false},
 						},
 						{
 							Header: &envoy_config_core_v3.HeaderValue{
-								Key:   "x-waf-violation",
-								Value: "1",
+								Key:      "x-waf-violation",
+								RawValue: []byte("1"),
 							},
 							Append: &wrapperspb.BoolValue{Value: false},
 						},

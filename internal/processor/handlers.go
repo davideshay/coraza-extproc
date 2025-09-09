@@ -204,6 +204,17 @@ func (p *Processor) processResponseHeaders(headers *envoy_service_ext_proc_v3.Ht
 			ResponseHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
 				Response: &envoy_service_ext_proc_v3.CommonResponse{
 					Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
+					HeaderMutation: &envoy_service_ext_proc_v3.HeaderMutation{
+						SetHeaders: []*envoy_config_core_v3.HeaderValueOption{
+							{
+								Header: &envoy_config_core_v3.HeaderValue{
+									Key:      "x-waf-violation",
+									RawValue: []byte("0"),
+								},
+								Append: &wrapperspb.BoolValue{Value: false},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -231,17 +242,7 @@ func (p *Processor) continueRequest() *envoy_service_ext_proc_v3.ProcessingRespo
 			RequestHeaders: &envoy_service_ext_proc_v3.HeadersResponse{
 				Response: &envoy_service_ext_proc_v3.CommonResponse{
 					Status: envoy_service_ext_proc_v3.CommonResponse_CONTINUE,
-					HeaderMutation: &envoy_service_ext_proc_v3.HeaderMutation{
-						SetHeaders: []*envoy_config_core_v3.HeaderValueOption{
-							{
-								Header: &envoy_config_core_v3.HeaderValue{
-									Key:      "x-waf-violation",
-									RawValue: []byte("0"),
-								},
-								Append: &wrapperspb.BoolValue{Value: false},
-							},
-						},
-					}},
+				},
 			},
 		},
 	}

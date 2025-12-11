@@ -1,5 +1,5 @@
 # Use multi-stage build with specific Go version
-FROM --platform=$BUILDPLATFORM golang:alpine3.22 AS builder
+FROM --platform=$BUILDPLATFORM golang:alpine3.23 AS builder
 
 # Install git for fetching dependencies (if needed)
 RUN apk add --no-cache git ca-certificates tzdata
@@ -7,7 +7,7 @@ RUN apk add --no-cache git ca-certificates tzdata
 # Set working directory
 WORKDIR /app
 
-RUN git clone --depth 1 --branch v4.19.0 https://github.com/corazawaf/coraza-coreruleset.git /opt/owasp-crs && \
+RUN git clone --depth 1 --branch v4.21.0 https://github.com/corazawaf/coraza-coreruleset.git /opt/owasp-crs && \
     mkdir -p /etc/coraza/conf && \
     cp /opt/owasp-crs/rules/@coraza.conf-recommended /etc/coraza/coraza.conf-recommended  && \
     cp /opt/owasp-crs/rules/@crs-setup.conf.example /etc/coraza/crs-setup.conf && \
@@ -39,7 +39,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o main .
 
 # Final stage - minimal runtime image
-FROM alpine:3.22
+FROM alpine:3.23
 
 # Copy CA certificates and timezone data
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

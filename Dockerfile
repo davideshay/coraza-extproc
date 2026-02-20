@@ -7,7 +7,7 @@ RUN apk add --no-cache git ca-certificates tzdata
 # Set working directory
 WORKDIR /app
 
-RUN git clone --depth 1 --branch v4.21.0 https://github.com/corazawaf/coraza-coreruleset.git /opt/owasp-crs && \
+RUN git clone --depth 1 --branch v4.23.0 https://github.com/corazawaf/coraza-coreruleset.git /opt/owasp-crs && \
     mkdir -p /etc/coraza/conf && \
     cp /opt/owasp-crs/rules/@coraza.conf-recommended /etc/coraza/coraza.conf-recommended  && \
     cp /opt/owasp-crs/rules/@crs-setup.conf.example /etc/coraza/crs-setup.conf && \

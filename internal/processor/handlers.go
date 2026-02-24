@@ -235,11 +235,11 @@ func (p *Processor) processResponseHeaders(headers *envoy_service_ext_proc_v3.Ht
 				slog.Duration("age", time.Since(streamInfo.CreatedAt)))
 			streamInfo.LastActivity = time.Now()
 		} else {
-			// Clean up any remaining stream info for regular HTTP requests
-			slog.Debug("Cleaning up HTTP stream after response headers",
+			// For regular HTTP requests, we'll clean up in processResponseBody
+			// instead of here to handle cases where Envoy sends response body after headers
+			slog.Debug("HTTP stream will be cleaned up after response body",
 				slog.String("streamID", streamID),
 				slog.Duration("age", time.Since(streamInfo.CreatedAt)))
-			p.removeStreamInfo(streamID)
 		}
 	}
 
@@ -268,6 +268,26 @@ func (p *Processor) processResponseHeaders(headers *envoy_service_ext_proc_v3.Ht
 func (p *Processor) processResponseBody(body *envoy_service_ext_proc_v3.HttpBody, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
 	slog.Debug("Processing response body", slog.String("streamID", streamID))
 	slog.Log(context.Background(), logging.LevelTrace, "Body Contents", slog.String("body", body.String()))
+
+	// Clean up stream info after response body for regular HTTP requests
+	streamInfo := p.getStreamInfo(streamID)
+	if streamInfo != nil {
+		if streamInfo.IsWebSocket {
+			slog.Debug("Keeping WebSocket stream active after response body",
+				slog.String("streamID", streamID),
+				slog.Duration("age", time.Since(streamInfo.CreatedAt)))
+			streamInfo.LastActivity = time.Now()
+		} else {
+			slog.Debug("Cleaning up HTTP stream after response body",
+				slog.String("streamID", streamID),
+				slog.Duration("age", time.Since(streamInfo.CreatedAt)))
+			p.removeStreamInfo(streamID)
+		}
+	} else {
+		slog.Debug("Stream already cleaned up or expired",
+			slog.String("streamID", streamID))
+	}
+
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ResponseBody{
 			ResponseBody: &envoy_service_ext_proc_v3.BodyResponse{

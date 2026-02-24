@@ -99,7 +99,14 @@ func (p *Processor) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_P
 	// Ensure cleanup when stream ends
 	defer func() {
 		if streamID != "" {
-			slog.Debug("Stream ending - cleaning up", slog.String("streamID", streamID))
+			slog.Debug("Stream ending - cleaning up",
+				slog.String("streamID", streamID),
+				slog.Bool("wasWebSocket", func() bool {
+					if info := p.getStreamInfo(streamID); info != nil {
+						return info.IsWebSocket
+					}
+					return false
+				}()))
 			p.removeStreamInfo(streamID)
 		}
 	}()
@@ -107,11 +114,23 @@ func (p *Processor) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_P
 	for {
 		req, err := stream.Recv()
 		if err != nil {
-			if err.Error() != "EOF" {
+			// Check if this is a context cancellation (client disconnected or stream closed)
+			errStr := err.Error()
+			if errStr != "EOF" && !strings.Contains(errStr, "context canceled") && !strings.Contains(errStr, "Canceled") {
 				if streamID != "" {
 					slog.Error("Error receiving from stream", slog.String("streamID", streamID), slog.Any("error", err))
 				} else {
 					slog.Error("Error receiving from stream", slog.Any("error", err))
+				}
+			} else if errStr != "EOF" {
+				// Log context cancellation with stack trace for debugging
+				if streamID != "" {
+					slog.Debug("Context canceled receiving from stream",
+						slog.String("streamID", streamID),
+						slog.String("error", errStr))
+				} else {
+					slog.Debug("Context canceled receiving from stream (no streamID yet)",
+						slog.String("error", errStr))
 				}
 			}
 			return err
@@ -150,7 +169,9 @@ func (p *Processor) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_P
 			return err
 		}
 
-		slog.Debug("Response sent", slog.String("streamID", streamID))
+		slog.Debug("Response sent",
+			slog.String("streamID", streamID),
+			slog.String("type", fmt.Sprintf("%T", req.Request)))
 	}
 }
 

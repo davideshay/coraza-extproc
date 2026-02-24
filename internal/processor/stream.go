@@ -100,6 +100,8 @@ func (p *Processor) removeStreamInfo(streamID string) {
 
 		slog.Debug("Removed stream info",
 			slog.String("streamID", streamID),
+			slog.Bool("wasWebSocket", info.IsWebSocket),
+			slog.Duration("age", time.Since(info.CreatedAt)),
 			slog.Int("remainingStreams", len(p.streams)))
 	}
 }

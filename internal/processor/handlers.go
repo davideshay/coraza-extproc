@@ -20,6 +20,7 @@ import (
 
 // processRequestHeaders handles incoming request headers
 func (p *Processor) processRequestHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
+	start := time.Now()
 	slog.Debug("Processing request headers", slog.String("streamID", streamID))
 
 	if headers == nil || headers.Headers == nil {
@@ -98,6 +99,13 @@ func (p *Processor) processRequestHeaders(headers *envoy_service_ext_proc_v3.Htt
 		IsWebSocket:  isWebSocket,
 		LastActivity: time.Now(),
 	}
+
+	slog.Debug("Created new stream info",
+		slog.String("streamID", streamID),
+		slog.String("authority", authority),
+		slog.String("uri", uri),
+		slog.Bool("isWebSocket", isWebSocket))
+
 	p.setStreamInfo(streamID, streamInfo)
 
 	// Process request line
@@ -112,6 +120,11 @@ func (p *Processor) processRequestHeaders(headers *envoy_service_ext_proc_v3.Htt
 
 	// Check for WAF blocks
 	if interruption := tx.ProcessRequestHeaders(); interruption != nil {
+		slog.Debug("WAF blocked request at headers phase",
+			slog.String("streamID", streamID),
+			slog.Bool("isWebSocket", isWebSocket),
+			slog.Int("ruleID", interruption.RuleID),
+			slog.String("action", interruption.Action))
 		savedStreamInfo := *streamInfo
 		p.removeStreamInfo(streamID)
 		return p.createBlockResponse(savedStreamInfo, interruption)
@@ -119,13 +132,15 @@ func (p *Processor) processRequestHeaders(headers *envoy_service_ext_proc_v3.Htt
 
 	slog.Debug("Request headers allowed",
 		slog.String("authority", authority),
-		slog.Bool("isWebSocket", isWebSocket))
+		slog.Bool("isWebSocket", isWebSocket),
+		slog.Duration("duration", time.Since(start)))
 
 	return p.continueRequest()
 }
 
 // processRequestBody handles request body data
 func (p *Processor) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
+	start := time.Now()
 	slog.Debug("Processing request body", slog.String("streamID", streamID))
 
 	if body == nil {
@@ -135,7 +150,8 @@ func (p *Processor) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody,
 
 	streamInfo := p.getStreamInfo(streamID)
 	if streamInfo == nil {
-		slog.Error(types.ErrNoStreamInfo, slog.String("streamID", streamID))
+		slog.Debug("Stream not found - may have expired or been cleaned up",
+			slog.String("streamID", streamID))
 		return p.continueRequestBody()
 	}
 
@@ -156,7 +172,6 @@ func (p *Processor) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody,
 	if len(body.Body) > 0 {
 		if _, _, err := tx.WriteRequestBody(body.Body); err != nil {
 			slog.Error("Failed to write request body", slog.Any("error", err))
-			p.removeStreamInfo(streamID)
 			return p.continueRequestBody()
 		}
 	}
@@ -178,16 +193,25 @@ func (p *Processor) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody,
 			return p.createBlockResponse(savedStreamInfo, interruption)
 		}
 
-		// For regular HTTP requests, clean up immediately
+		// For regular HTTP requests, clean up after request body
 		// For WebSocket, keep the connection info for potential future use
 		if !streamInfo.IsWebSocket {
-			slog.Debug("Cleaning up completed HTTP request")
+			slog.Debug("Cleaning up completed HTTP request",
+				slog.String("streamID", streamID),
+				slog.Bool("isWebSocket", streamInfo.IsWebSocket))
 			p.removeStreamInfo(streamID)
 		} else {
-			slog.Debug("Keeping WebSocket stream active")
+			slog.Debug("Keeping WebSocket stream active",
+				slog.String("streamID", streamID),
+				slog.Bool("isWebSocket", streamInfo.IsWebSocket),
+				slog.Duration("age", time.Since(streamInfo.CreatedAt)))
 			streamInfo.LastActivity = time.Now()
 		}
 	}
+
+	slog.Debug("Request body processing completed",
+		slog.String("streamID", streamID),
+		slog.Duration("duration", time.Since(start)))
 
 	return p.continueRequestBody()
 }
@@ -196,8 +220,28 @@ func (p *Processor) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody,
 func (p *Processor) processResponseHeaders(headers *envoy_service_ext_proc_v3.HttpHeaders, streamID string) *envoy_service_ext_proc_v3.ProcessingResponse {
 	slog.Debug("Processing response headers", slog.String("streamID", streamID))
 	slog.Log(context.Background(), logging.LevelTrace, "Response Headers", slog.String("headers", headers.String()))
-	// Clean up any remaining stream info
-	p.removeStreamInfo(streamID)
+
+	// Check if stream exists
+	streamInfo := p.getStreamInfo(streamID)
+	if streamInfo == nil {
+		slog.Debug("Stream already cleaned up or expired (expected behavior)",
+			slog.String("streamID", streamID))
+	} else {
+		// For WebSocket connections, keep the stream active after response headers
+		// The stream will be cleaned up when the WebSocket connection closes
+		if streamInfo.IsWebSocket {
+			slog.Debug("Keeping WebSocket stream active after response headers",
+				slog.String("streamID", streamID),
+				slog.Duration("age", time.Since(streamInfo.CreatedAt)))
+			streamInfo.LastActivity = time.Now()
+		} else {
+			// Clean up any remaining stream info for regular HTTP requests
+			slog.Debug("Cleaning up HTTP stream after response headers",
+				slog.String("streamID", streamID),
+				slog.Duration("age", time.Since(streamInfo.CreatedAt)))
+			p.removeStreamInfo(streamID)
+		}
+	}
 
 	return &envoy_service_ext_proc_v3.ProcessingResponse{
 		Response: &envoy_service_ext_proc_v3.ProcessingResponse_ResponseHeaders{

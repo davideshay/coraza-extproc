@@ -122,17 +122,8 @@ func (p *Processor) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_P
 				} else {
 					slog.Error("Error receiving from stream", slog.Any("error", err))
 				}
-			} else if errStr != "EOF" {
-				// Log context cancellation with stack trace for debugging
-				if streamID != "" {
-					slog.Debug("Context canceled receiving from stream",
-						slog.String("streamID", streamID),
-						slog.String("error", errStr))
-				} else {
-					slog.Debug("Context canceled receiving from stream (no streamID yet)",
-						slog.String("error", errStr))
-				}
 			}
+			// Context cancellations are normal gRPC stream lifecycle events and don't indicate a problem
 			return err
 		}
 

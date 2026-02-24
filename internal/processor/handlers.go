@@ -193,14 +193,9 @@ func (p *Processor) processRequestBody(body *envoy_service_ext_proc_v3.HttpBody,
 			return p.createBlockResponse(savedStreamInfo, interruption)
 		}
 
-		// For regular HTTP requests, clean up after request body
 		// For WebSocket, keep the connection info for potential future use
-		if !streamInfo.IsWebSocket {
-			slog.Debug("Cleaning up completed HTTP request",
-				slog.String("streamID", streamID),
-				slog.Bool("isWebSocket", streamInfo.IsWebSocket))
-			p.removeStreamInfo(streamID)
-		} else {
+		// For regular HTTP requests, we keep the stream active until response is complete
+		if streamInfo.IsWebSocket {
 			slog.Debug("Keeping WebSocket stream active",
 				slog.String("streamID", streamID),
 				slog.Bool("isWebSocket", streamInfo.IsWebSocket),
@@ -277,7 +272,8 @@ func (p *Processor) processResponseBody(body *envoy_service_ext_proc_v3.HttpBody
 				slog.String("streamID", streamID),
 				slog.Duration("age", time.Since(streamInfo.CreatedAt)))
 			streamInfo.LastActivity = time.Now()
-		} else {
+		} else if body.EndOfStream {
+			// Only clean up when we've reached the end of the response body
 			slog.Debug("Cleaning up HTTP stream after response body",
 				slog.String("streamID", streamID),
 				slog.Duration("age", time.Since(streamInfo.CreatedAt)))

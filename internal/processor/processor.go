@@ -99,15 +99,13 @@ func (p *Processor) Process(stream envoy_service_ext_proc_v3.ExternalProcessor_P
 	// Ensure cleanup when stream ends
 	defer func() {
 		if streamID != "" {
-			slog.Debug("Stream ending - cleaning up",
-				slog.String("streamID", streamID),
-				slog.Bool("wasWebSocket", func() bool {
-					if info := p.getStreamInfo(streamID); info != nil {
-						return info.IsWebSocket
-					}
-					return false
-				}()))
-			p.removeStreamInfo(streamID)
+			// Only log and cleanup if stream still exists
+			if info := p.getStreamInfo(streamID); info != nil {
+				slog.Debug("Stream ending - cleaning up",
+					slog.String("streamID", streamID),
+					slog.Bool("wasWebSocket", info.IsWebSocket))
+				p.removeStreamInfo(streamID)
+			}
 		}
 	}()
 
